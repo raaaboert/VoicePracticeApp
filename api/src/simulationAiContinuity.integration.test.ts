@@ -12,6 +12,7 @@ import { createDatabaseStorage } from "./storage.js";
 import { createFocusTopicAuthorityStore } from "./storage/focusTopicAuthorityStore.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createTrainingContentStore } from "./storage/trainingContentStore.js";
+import { SimulationScoringCoordinator } from "./services/simulationScoringCoordinator.js";
 
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim();
 test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring and accounting beyond technical thresholds", { skip: !databaseUrl }, async (t) => {
@@ -20,7 +21,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
   let server: Server | undefined;
   try {
     Object.assign(process.env, { NODE_ENV: "test", PERITIO_ENV: "development", STORAGE_PROVIDER: "postgres", DATABASE_URL: db.url,
-      PG_IDLE_TIMEOUT_MS: "100", FOCUS_TOPIC_AUTHORITY: "assignments", AI_SPEND_LEDGER_MODE: "off",
+      PG_IDLE_TIMEOUT_MS: "100", PG_POOL_MAX: "5", FOCUS_TOPIC_AUTHORITY: "assignments", AI_SPEND_LEDGER_MODE: "off",
       MOBILE_TOKEN_SECRET: "continuity_local_mobile_secret_32_characters", WEB_AUTH_TOKEN_SECRET: "continuity_local_web_secret_32_characters",
       ADMIN_TOKEN_SECRET: "continuity_local_admin_secret_32_characters", ADMIN_BOOTSTRAP_PASSWORD: "continuity_local_password",
       SUPPORT_TRANSCRIPT_SECRET: "continuity_local_support_secret_32_characters", AUTH_CODE_DELIVERY_PROVIDER: "log_only",
@@ -39,6 +40,10 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       status: "active" as const, emailVerifiedAt: now, email: `continuity-${i}@example.test`, firstName: "Local", lastName: "Learner",
       mobileProfileReonboardingRequired: false, manualBonusSeconds: 0 }));
     const tokens = ["continuity-local-a", "continuity-local-b"];
+    for (let i = 2; i < 9; i++) {
+      users.push({ ...users[0]!, id: `continuity_learner_${i}`, email: `continuity-${i}@example.test`, employeeId: `CONTINUITY-${i}` });
+      tokens.push(`continuity-local-${i}`);
+    }
     state.orgs = orgs; state.users = users;
     state.mobileAuthTokens = users.map((u, i) => ({ userId: u.id, tokenHash: createHmac("sha256", process.env.MOBILE_TOKEN_SECRET!).update(tokens[i]!).digest("hex"), createdAt: now, updatedAt: now }));
     const segment = state.config.segments.find((s) => s.id === "solution_manager")!;
@@ -57,6 +62,9 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       await authority.attachScenario({ id: `continuity_attachment_${i}`, orgId: org.id, topicId: state.orgTrainings[i]!.id,
         scenarioKind: "standard", scenarioId: scenario.id, attachedBy: "platform_admin", attachedAt: now, detachedAt: null, detachedBy: null }, db.pool);
     }
+    for (let i = 2; i < users.length; i++) await authority.createAssignment({ id: `continuity_assignment_${i}`, orgId: orgs[0]!.id,
+      topicId: state.orgTrainings[0]!.id, audience: "individual", subjectUserId: users[i]!.id, grantsManagement: false,
+      createdBy: "platform_admin", createdAt: now, revokedAt: null, revokedBy: null }, db.pool);
     const usage = createAiUsageEventStore({ provider: "postgres", databaseUrl: db.url, dbPath: "unused", pgPoolMax: 1, pgConnectTimeoutMs: 1000, pgIdleTimeoutMs: 100 }); await usage.initialize();
     server = await new Promise<Server>((resolve) => { const s = api.app.listen(0, "127.0.0.1", () => resolve(s)); });
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -65,6 +73,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8, strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." };
     let providerCalls = 0, scoring = false, failProvider = false;
     let speechCalls = 0, speechGate: Promise<void> | null = null, speechEntered = () => {}, failSpeech = false;
+    let scoreGate: Promise<void> | null = null, scoreEntered = () => {};
     globalThis.fetch = async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       if (!url.startsWith("https://api.openai.com/")) return originalFetch(input, init);
@@ -76,6 +85,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
           : new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/mpeg" } });
       }
       if (url.endsWith("/audio/transcriptions")) return Response.json({ text: "I will identify the concern and agree a clear next step." });
+      if (scoring) { scoreEntered(); await scoreGate; }
       const content = scoring ? JSON.stringify(score) : text;
       if (url.endsWith("/responses")) return Response.json({ output_text: content, model: "mocked-local", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } });
       if (url.endsWith("/chat/completions")) return Response.json({ choices: [{ message: { content } }], model: "mocked-local", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
@@ -84,7 +94,8 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
     const headers = (actor = 0) => ({ Authorization: `Bearer ${tokens[actor]}`, "Content-Type": "application/json" });
     const call = (path: string, body?: unknown, actor = 0) => originalFetch(`${base}/mobile/users/${users[actor]!.id}/${path}`, {
       method: body === undefined ? "GET" : "POST", headers: headers(actor), body: body === undefined ? undefined : JSON.stringify(body) });
-    const requestContext = (id: string, actor = 0) => ({ simulationSessionId: id, scenarioId: scenario.id, segmentId: segment.id, trainingId: state.orgTrainings[actor]!.id, industryId: orgs[actor]!.activeIndustries[0] });
+    const requestContext = (id: string, actor = 0) => ({ simulationSessionId: id, scenarioId: scenario.id, segmentId: segment.id,
+      trainingId: state.orgTrainings[actor === 1 ? 1 : 0]!.id, industryId: orgs[actor === 1 ? 1 : 0]!.activeIndustries[0] });
     const start = async (id: string, actor = 0) => {
       const result = await call("simulation-sessions/start", requestContext(id, actor), actor); assert.equal(result.status, 201, await result.clone().text());
       return await result.json() as { serverStartedAt: string };
@@ -164,6 +175,143 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
         const expired = await call(route, { ...requestContext(id), history, startedAt: now, endedAt: now }); assert.equal(expired.status, 409);
       }
       assert.equal((await speech(id, authorization)).status, 409); assert.equal(providerCalls, before);
+    });
+    await t.test("nine authorized learners score concurrently with PG_POOL_MAX=5 even beyond technical thresholds", { timeout: 25000 }, async () => {
+      api.clearRateLimitsForTest();
+      const sessions: Array<{ id: string; actor: number; started: { serverStartedAt: string } }> = [];
+      for (let actor = 0; actor < 9; actor++) {
+        const id = `capacity_learner_${actor}`;
+        sessions.push({ id, actor, started: await start(id, actor) });
+      }
+      await exhaust("calls");
+      let release = () => {}, entered = 0, failed = 0;
+      scoreGate = new Promise<void>((resolve) => { release = resolve; });
+      scoreEntered = () => { if (++entered === 9) release(); };
+      scoring = true;
+      const before = providerCalls, startedAt = Date.now();
+      try {
+        const results = await Promise.all(sessions.map(async ({ id, actor, started }) => {
+          const result = await call("ai/score", { ...requestContext(id, actor), history,
+            startedAt: started.serverStartedAt, endedAt: new Date().toISOString() }, actor);
+          // Allow the old five-slot implementation to finish and report its
+          // actual failure, without a fragile ten-second provider sleep.
+          if (result.status !== 201 && ++failed === 4) release();
+          return result;
+        }));
+        const passed = results.filter((result) => result.status === 201).length;
+        t.diagnostic(`Nine-learner capacity: ${passed}/9 scored, provider dispatches=${providerCalls - before}, elapsed=${Date.now() - startedAt} ms`);
+        assert.equal(passed, 9, JSON.stringify(await Promise.all(results.map(async (result) => [result.status, await result.clone().text()]))));
+        assert.equal(providerCalls - before, 9);
+        const persisted = await db.pool.query("SELECT simulation_session_id,user_id FROM score_records WHERE simulation_session_id=ANY($1::text[])", [sessions.map((session) => session.id)]);
+        assert.equal(persisted.rowCount, 9); assert.equal(new Set(persisted.rows.map((row) => row.user_id)).size, 9);
+        for (const { id, actor, started } of sessions) assert.equal((await call("ai/score", {
+          ...requestContext(id, actor), history, startedAt: started.serverStartedAt, endedAt: new Date().toISOString(),
+        }, actor)).status, 200);
+        assert.equal(providerCalls - before, 9, "recovery never dispatches another evaluation");
+      } finally { release(); scoring = false; scoreGate = null; scoreEntered = () => {}; }
+    });
+    await t.test("optional coordinator distinguishes genuine busy ownership from quickly exhausted capacity and recovers", async () => {
+      const options = { databaseUrl: db.url, pgPoolMax: 1, pgConnectTimeoutMs: 8000, pgIdleTimeoutMs: 100 };
+      const a = new SimulationScoringCoordinator(options), b = new SimulationScoringCoordinator(options);
+      const identity = { userId: users[0]!.id, orgId: orgs[0]!.id, sessionId: "pool-saturation-a" };
+      const other = { ...identity, sessionId: "pool-saturation-b" };
+      const held = await a.acquire(identity); assert.equal(held.status, "acquired");
+      if (held.status !== "acquired") throw Error("Expected acquired lease");
+      try {
+        assert.equal((await a.acquire(identity)).status, "busy", "known local owner does not queue for a connection");
+        assert.equal((await b.acquire(identity)).status, "busy", "PostgreSQL lock collision is not capacity exhaustion");
+        const started = Date.now();
+        const saturated = await a.acquire(other);
+        t.diagnostic(`Optional coordinator saturation fallback: ${Date.now() - started} ms`);
+        assert.equal(saturated.status, "unavailable");
+        assert.ok(Date.now() - started < 2000, "optional capacity wait must not use the eight-second ordinary database timeout");
+        const independent = await b.acquire(other); assert.equal(independent.status, "acquired", "different sessions have distinct lock identities");
+        if (independent.status === "acquired") await independent.release();
+        await held.release();
+        const recovered = await a.acquire(other); assert.equal(recovered.status, "acquired");
+        if (recovered.status === "acquired") await recovered.release();
+      } finally { await held.release(); await a.close(); await b.close(); }
+      assert.equal((await a.acquire(other)).status, "unavailable", "a failed optional resource does not throw or pretend another owner exists");
+    });
+    await t.test("essential database failure during optional scoring fallback dispatches no provider work", async () => {
+      const id = "essential_database_failure"; const started = await start(id);
+      const acquire = SimulationScoringCoordinator.prototype.acquire;
+      let injected = false;
+      SimulationScoringCoordinator.prototype.acquire = async () => {
+        await db.pool.query("ALTER TABLE simulation_sessions RENAME TO temporarily_unavailable_sessions");
+        injected = true;
+        return { status: "unavailable" };
+      };
+      const body = { ...requestContext(id), history, startedAt: started.serverStartedAt, endedAt: new Date().toISOString() };
+      const before = providerCalls;
+      try {
+        const failed = await call("ai/score", body);
+        assert.equal(injected, true);
+        assert.equal(failed.status, 503); assert.equal((await failed.json() as any).code, "ai_unavailable");
+        assert.equal(providerCalls, before, "essential session authorization must remain available before provider dispatch");
+        assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM score_records WHERE simulation_session_id=$1", [id])).rows[0].n, 0);
+      } finally {
+        if (injected) await db.pool.query("ALTER TABLE temporarily_unavailable_sessions RENAME TO simulation_sessions");
+        SimulationScoringCoordinator.prototype.acquire = acquire;
+      }
+      scoring = true;
+      try {
+        assert.equal((await call("ai/score", body)).status, 201, "ordinary scoring recovers once essential persistence is available");
+        assert.equal((await call("ai/score", body)).status, 200);
+        assert.equal(providerCalls - before, 1);
+      } finally { scoring = false; }
+    });
+    await t.test("optional ownership loss cannot discard a legitimate generated score when essential persistence remains available", async () => {
+      const id = "optional_ownership_loss"; const started = await start(id);
+      const acquire = SimulationScoringCoordinator.prototype.acquire;
+      SimulationScoringCoordinator.prototype.acquire = async function(identity) {
+        const result = await acquire.call(this, identity);
+        if (result.status === "acquired") await result.release();
+        return result;
+      };
+      const before = providerCalls; scoring = true;
+      try {
+        const body = { ...requestContext(id), history, startedAt: started.serverStartedAt, endedAt: new Date().toISOString() };
+        assert.equal((await call("ai/score", body)).status, 201);
+        assert.equal((await call("ai/score", body)).status, 200);
+        assert.equal(providerCalls - before, 1);
+      } finally { scoring = false; SimulationScoringCoordinator.prototype.acquire = acquire; }
+    });
+    await t.test("legacy unbound speech reuses a session-bound pending prefetch without gaining technical-budget exemption", { timeout: 15000 }, async () => {
+      api.clearRateLimitsForTest(); await db.pool.query("DELETE FROM ai_usage_events");
+      const id = "legacy_bound_prefetch"; await start(id);
+      const before = speechCalls;
+      let release = () => {}, entered = () => {};
+      speechGate = new Promise<void>((resolve) => { release = resolve; });
+      const started = new Promise<void>((resolve) => { speechEntered = resolve; });
+      const consumed = new Promise<void>((resolve) => { entered = resolve; });
+      const registry = api.simulationSpeechPrefetchRegistry, consume = registry.consume.bind(registry);
+      const chunk = splitTextForRemoteTtsFastStart(text)[0]!;
+      const legacy = (actor = 0) => originalFetch(`${base}/mobile/users/${users[actor]!.id}/ai/tts`, { method: "POST",
+        headers: { ...headers(actor), "X-Correlation-Id": "legacy-bound-response" }, body: JSON.stringify({ text: chunk, preset: "female-balanced" }) });
+      try {
+        const opening = originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/opening`, { method: "POST",
+          headers: { ...headers(), "X-Correlation-Id": "legacy-bound-response" }, body: JSON.stringify({ ...requestContext(id), speechPrefetch: { preset: "female-balanced" } }) });
+        await started;
+        registry.consume = (params) => { const pending = consume(params); entered(); return pending; };
+        const foreground = legacy(); await consumed; release();
+        const result = await foreground; assert.equal(result.status, 200, await result.clone().text());
+        assert.equal((await opening).status, 200);
+        t.diagnostic(`Legacy TTS provider dispatches=${speechCalls - before}`);
+        assert.equal(result.headers.get("X-TTS-Audio-Source"), "in_flight_prefetch");
+        assert.equal(speechCalls - before, 1);
+        await exhaust("calls");
+        const capped = await legacy(); assert.equal(capped.status, 429, "cached legacy audio does not bypass budget policy");
+        assert.equal(speechCalls - before, 1);
+        await db.pool.query("DELETE FROM ai_usage_events");
+        for (const actor of [1, 2]) {
+          const unrelated = await legacy(actor); assert.equal(unrelated.status, 200);
+          assert.equal(unrelated.headers.get("X-TTS-Audio-Source"), "foreground_generation", "another tenant or same-org account never reuses the audio");
+        }
+        assert.equal(speechCalls - before, 3);
+        assert.equal((await legacy()).headers.get("X-TTS-Audio-Source"), "in_flight_prefetch");
+        assert.equal(speechCalls - before, 3);
+      } finally { release(); speechGate = null; speechEntered = () => {}; registry.consume = consume; }
     });
     await t.test("HTTP speech joins prefetch and overlapping foreground work; timeout, cancellation and retry never fork pending synthesis", { timeout: 15000 }, async () => {
       api.clearRateLimitsForTest();

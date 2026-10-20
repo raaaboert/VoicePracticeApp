@@ -118,7 +118,15 @@ export class SimulationSpeechPrefetchRegistry<T> {
     const nowMs = params.nowMs ?? Date.now();
     const correlationId = params.correlationId.trim();
     const key = this.key(params);
-    const entry = this.entries.get(key) ?? [...this.entries.values()].find((candidate) => candidate.correlationId === correlationId);
+    const textHash = hashText(params.text);
+    const entries = [...this.entries.values()];
+    // Legacy speech is already authenticated, org-scoped and budget-checked
+    // before this lookup. Missing session identity may reuse identical audio;
+    // it never grants registered-session budget admission.
+    const legacyMatch = params.sessionId == null ? entries.find((candidate) => candidate.correlationId === correlationId
+      && candidate.userId === params.userId && candidate.orgId === (params.orgId ?? null)
+      && candidate.preset === params.preset && candidate.textHash === textHash) : undefined;
+    const entry = this.entries.get(key) ?? legacyMatch ?? entries.find((candidate) => candidate.correlationId === correlationId);
     if (!entry) {
       this.sweep(nowMs);
       return { status: "miss", reason: "not_found" };
@@ -131,11 +139,11 @@ export class SimulationSpeechPrefetchRegistry<T> {
     const mismatchReason =
       entry.userId !== params.userId
         ? "user_mismatch"
-        : entry.orgId !== (params.orgId ?? null) || entry.sessionId !== (params.sessionId ?? null)
+        : entry.orgId !== (params.orgId ?? null) || (params.sessionId != null && entry.sessionId !== params.sessionId)
           ? "context_mismatch"
         : entry.preset !== params.preset
           ? "preset_mismatch"
-          : entry.textHash !== hashText(params.text)
+          : entry.textHash !== textHash
             ? "text_mismatch"
             : null;
     if (mismatchReason) {

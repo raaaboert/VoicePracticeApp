@@ -25392,16 +25392,20 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
         submittedTrainingPackId
       });
 
-  let scoringClaim: Awaited<ReturnType<SimulationScoringCoordinator["acquire"]>> = null;
+  let scoringClaim: Extract<Awaited<ReturnType<SimulationScoringCoordinator["acquire"]>>, { status: "acquired" }> | null = null;
   try {
     if (!context.isSuperUser && recognizedSessionId) {
-      scoringClaim = await simulationScoringCoordinator.acquire({ sessionId: recognizedSessionId, userId: context.user.id, orgId: context.actingOrgId });
-      if (!scoringClaim) {
+      const coordination = await simulationScoringCoordinator.acquire({ sessionId: recognizedSessionId, userId: context.user.id, orgId: context.actingOrgId });
+      if (coordination.status === "busy") {
         response.setHeader("Retry-After", "2");
         response.status(503).json({ error: "Scoring is already in progress. Recover the saved score or try again shortly.", code: "ai_unavailable" });
         return;
       }
+      if (coordination.status === "acquired") scoringClaim = coordination;
+      else logWarnThrottled("simulation-score:coordination-unavailable", "[simulation-score] optional coordination unavailable; using ordinary authorized scoring");
       // Another process may have committed between the initial read and lock.
+      // These ordinary database reads remain essential even when optional
+      // coordination is unavailable; failure must stop paid provider dispatch.
       const completed = await scoreRecordStore.getPersistedSessionScore(recognizedSessionId);
       if (completed) {
         if (completed.userId !== context.user.id || completed.orgId !== context.actingOrgId || completed.scenarioId !== context.scenario.id) {
@@ -25414,6 +25418,10 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       recognizedSessionId && !context.isSuperUser
         ? await simulationSessionStore.getById(recognizedSessionId)
         : null;
+    if (!context.isSuperUser && !recognizedSession) {
+      response.status(404).json({ error: "Simulation session is not available.", code: "session_not_recognized" });
+      return;
+    }
     if (
       recognizedSession &&
       !doesRecognizedSimulationSessionMatchContext(recognizedSession, {
@@ -25480,7 +25488,6 @@ app.post("/mobile/users/:userId/ai/score", requireMobileAiAuthentication, aiRout
       latencyMs
     });
 
-    scoringClaim?.assertHeld();
     const parsed = JSON.parse(extractJsonObject(completion.text)) as unknown;
     assertValidSimulationScorePayload(parsed);
     const scoringWeights = evaluationConfig?.scoringWeights ?? getDefaultScoringWeights();

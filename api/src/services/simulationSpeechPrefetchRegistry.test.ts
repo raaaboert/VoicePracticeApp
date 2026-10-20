@@ -3,6 +3,20 @@ import test from "node:test";
 
 import { SimulationSpeechPrefetchRegistry } from "./simulationSpeechPrefetchRegistry.js";
 
+test("legacy reuse matches authenticated user/org and exact speech while bound clients still require their session identity", async () => {
+  const registry = new SimulationSpeechPrefetchRegistry<string>();
+  const identity = { correlationId: "shared-correlation", userId: "learner", orgId: "org", preset: "female-bright", text: "Server response" };
+  registry.register({ ...identity, userId: "other", sessionId: "foreign", promise: Promise.resolve("foreign audio") });
+  registry.register({ ...identity, sessionId: "registered", promise: Promise.resolve("authorized audio") });
+  assert.deepEqual(await registry.consume(identity), { status: "hit", value: "authorized audio" });
+  assert.deepEqual(await registry.consume({ ...identity, sessionId: "registered" }), { status: "hit", value: "authorized audio" });
+  for (const other of [{ ...identity, userId: "unknown" }, { ...identity, orgId: "unrelated" },
+    { ...identity, preset: "male-warm" }, { ...identity, text: "Different response" },
+    { ...identity, correlationId: "forged-correlation" }, { ...identity, sessionId: "another-session" }]) {
+    assert.equal((await registry.consume(other)).status, "miss");
+  }
+});
+
 test("concurrent foreground retries share one synthesis and failures release it for a fresh retry", async () => {
   const registry = new SimulationSpeechPrefetchRegistry<string>();
   const identity = { correlationId: "response", userId: "u", orgId: "org", sessionId: "session", preset: "female-bright", text: "Real response" };
