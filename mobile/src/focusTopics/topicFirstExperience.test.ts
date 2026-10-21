@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { homeFocusTopicPreview, createFocusTopicCatalogController } from "./catalog";
-import { buildScenarioSetupSelection, simulationTopicReturnOrigin } from "../trainingContent/scenarioSetupNavigation";
+import { buildScenarioSetupSelection, simulationTopicReturnOrigin, simulationTopicAttributionId } from "../trainingContent/scenarioSetupNavigation";
 import { getTrainingContentTheme } from "../trainingContent/theme";
 
 const app = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
@@ -142,20 +142,84 @@ test("actual simulation setup captures standard/custom Topic origins without cha
   for (const source of ["standard", "custom"] as const) {
     const chosen = { ...scenario, source, trainingId: source === "custom" ? "topic" : null };
     const context = { simulationTopicReturnOrigin, setupOrigin: { type: "focus_topic", topicId: "topic" },
+      simulationTopicAttributionId, industryOptions: [{ id: "sales", roles: [{ id: chosen.segmentId, scenarios: [chosen] }] }],
       originScenarioSelection: buildScenarioSetupSelection(chosen), scenarioCatalogTab: source,
       activeTraining: { id: "topic" }, industryId: "sales", activeSegment: { id: "sales_representative" }, scenario: chosen };
     const captured = execute(app, "topicOrigin", context);
     assert.deepEqual(captured, { type: "focus_topic", topicId: "topic" });
+    const attribution = execute(app, "originTopicId", context);
+    assert.equal(attribution, "topic");
     await register("learner", { simulationSessionId: "session", scenarioId: chosen.id, segmentId: chosen.segmentId,
-      trainingId: chosen.trainingId, originTopicId: captured.topicId }, "token");
+      trainingId: chosen.trainingId, originTopicId: attribution }, "token");
     assert.equal(delivered.originTopicId, "topic");
     assert.equal(delivered.trainingId, chosen.trainingId);
     assert.equal(execute(app, "topicOrigin", { ...context, setupOrigin: null }), null);
     assert.equal(execute(app, "topicOrigin", { ...context, scenario: { ...chosen, id: "other" } }), null);
+    assert.equal(execute(app, "originTopicId", { ...context, setupOrigin: null }), null);
+    assert.equal(execute(app, "originTopicId", { ...context, scenario: { ...chosen, id: "other" } }), null);
   }
-  assert.match(app, /originTopicId: setupOriginTopicId\(topicOrigin\)/);
+  assert.match(app, /originTopicId,\s+simulationSessionId:/);
   const simulation = readFileSync(new URL("../screens/SimulationScreen.tsx", import.meta.url), "utf8");
   assert.match(simulation, /originTopicId: config\.originTopicId \?\? null/);
+});
+
+test("Topic custom practice keeps attribution through registration after an eligible industry change, while navigation remains exact", async () => {
+  const configured = { ...scenario, enabled: true, description: "Practice", desiredOutcome: "Agree next steps",
+    aiRole: "A counterpart", applicableIndustryIds: ["sales", "people_management"] };
+  // Execute the real Topic-scoped custom-options projection, including scenario attachment.
+  const trainings = execute(app, "activeCustomTrainingOptions", {
+    useMemo: (factory: () => any) => factory(), activeOrgCustomScenarios: [configured],
+    enabledIndustries: configured.applicableIndustryIds.map(id => ({ id, label: id })),
+    enabledSegments: [{ id: configured.segmentId, label: "Salesperson", enabled: true }],
+    config: { orgTrainings: [{ id: "topic", name: "Topic", status: "active", description: "", attachedCustomScenarioIds: [configured.id] }] },
+    toRuntimeScenarioFromCustomScenario: execute(app, "toRuntimeScenarioFromCustomScenario", {}),
+    sanitizeTrainingDescription: (value: string) => value,
+  });
+  assert.equal(trainings.length, 1);
+  assert.deepEqual(trainings[0].industries.map((industry: any) => industry.id), configured.applicableIndustryIds);
+  for (const industry of trainings[0].industries) {
+    assert.equal(industry.roles[0].id, configured.segmentId);
+    assert.equal(industry.roles[0].scenarios[0].id, configured.id);
+  }
+  const context = { simulationTopicReturnOrigin, simulationTopicAttributionId,
+    setupOrigin: { type: "focus_topic", topicId: "topic" }, originScenarioSelection: buildScenarioSetupSelection(configured),
+    scenarioCatalogTab: "custom", activeTraining: trainings[0], activeSegment: trainings[0].industries[0].roles[0],
+    scenario: configured, industryOptions: trainings[0].industries, industryId: "sales" };
+  assert.equal(execute(app, "originTopicId", context), "topic");
+  assert.deepEqual(execute(app, "topicOrigin", context), context.setupOrigin);
+  const changed = { ...context, industryId: "people_management" };
+  assert.equal(execute(app, "originTopicId", changed), "topic");
+  assert.equal(execute(app, "topicOrigin", changed), null, "existing industry-specific return navigation is unchanged");
+  let body: any;
+  const register = execute(readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8"), "startSimulationSession", {
+    requestJson: async (_path: string, init: { body: string }) => { body = JSON.parse(init.body); },
+  });
+  await register("learner", { simulationSessionId: "session", scenarioId: configured.id, segmentId: configured.segmentId,
+    trainingId: trainings[0].id, originTopicId: execute(app, "originTopicId", changed) }, "token");
+  assert.equal(body.originTopicId, "topic");
+  assert.equal(body.trainingId, "topic");
+  assert.equal(execute(app, "originTopicId", { ...changed, industryId: "medical" }), null);
+  assert.equal(execute(app, "originTopicId", { ...changed, industryOptions: [] }), null);
+});
+
+test("Topic attribution rejects unrelated, ineligible and Browse selections", () => {
+  const origin = { type: "focus_topic" as const, topicId: "topic" };
+  const industries = [{ id: "sales", roles: [{ id: scenario.segmentId, scenarios: [{ id: scenario.id, enabled: true }] }] }];
+  assert.equal(simulationTopicAttributionId(origin, selected, applied, industries), "topic");
+  for (const changed of [
+    { ...applied, scenarioId: "unrelated" }, { ...applied, roleId: "unrelated" },
+    { ...applied, trainingId: "unrelated" }, { ...applied, scenarioCatalogTab: "standard" as const, trainingId: null },
+    { ...applied, industryId: "ineligible" }, { ...applied, industryId: null },
+  ]) assert.equal(simulationTopicAttributionId(origin, selected, changed, industries), null);
+  assert.equal(simulationTopicAttributionId({ ...origin, topicId: "other_topic" }, selected, applied, industries), null);
+  assert.equal(simulationTopicAttributionId(null, selected, applied, industries), null);
+  assert.equal(simulationTopicAttributionId({ type: "learning_resource", contentId: "resource" }, selected, applied, industries), null);
+  assert.equal(simulationTopicAttributionId(origin, null, applied, industries), null);
+  assert.equal(simulationTopicAttributionId(origin, selected, applied, []), null);
+  assert.equal(simulationTopicAttributionId(origin, selected, applied,
+    [{ id: "sales", roles: [{ ...industries[0]!.roles[0]!, enabled: false }] }]), null);
+  assert.equal(simulationTopicAttributionId(origin, selected, applied,
+    [{ id: "sales", roles: [{ id: scenario.segmentId, scenarios: [{ id: scenario.id, enabled: false }] }] }]), null);
 });
 
 test("actual Home navigation opens a Topic directly or the full catalog and clears old origins", () => {

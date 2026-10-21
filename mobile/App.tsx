@@ -185,6 +185,7 @@ import {
   setupOriginContentId,
   setupOriginTopicId,
   simulationTopicReturnOrigin,
+  simulationTopicAttributionId,
   type ScenarioSetupSelection,
   type SetupOrigin,
 } from "./src/trainingContent/scenarioSetupNavigation";
@@ -3766,9 +3767,13 @@ export default function App() {
         scenarioCatalogTab, trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
         industryId, roleId: activeSegment.id, scenarioId: scenario.id,
       });
+      const originTopicId = simulationTopicAttributionId(setupOrigin, originScenarioSelection, {
+        scenarioCatalogTab, trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
+        industryId, roleId: activeSegment.id, scenarioId: scenario.id,
+      }, industryOptions);
       setSimulationReturnOrigin(topicOrigin);
       setSimulationConfig({
-        originTopicId: setupOriginTopicId(topicOrigin),
+        originTopicId,
         simulationSessionId: createSimulationSessionId(),
         scenario,
         industryId,

@@ -70,3 +70,23 @@ export function simulationTopicReturnOrigin(
   return origin?.type === "focus_topic" && requested && isExactScenarioSetupSelection(requested, applied)
     ? { ...origin } : null;
 }
+
+/** Attribution may follow an eligible industry change; navigation matching stays exact. */
+export function simulationTopicAttributionId(
+  origin: SetupOrigin | null,
+  requested: ScenarioSetupSelection | null,
+  applied: AppliedScenarioSetupSelection,
+  eligibleIndustries: readonly {
+    id: string;
+    roles: readonly { id: string; enabled?: boolean; scenarios: readonly { id: string; enabled?: boolean }[] }[];
+  }[],
+): string | null {
+  if (origin?.type !== "focus_topic" || !requested || !applied.industryId) return null;
+  // Compare the same practice identity, allowing only the industry to differ.
+  if (!isExactScenarioSetupSelection(requested, { ...applied, industryId: requested.selectedIndustryId })) return null;
+  if (applied.scenarioCatalogTab === "custom" && applied.trainingId !== origin.topicId) return null;
+  const eligible = eligibleIndustries.some(industry => industry.id === applied.industryId
+    && industry.roles.some(role => role.id === applied.roleId && role.enabled !== false
+      && role.scenarios.some(scenario => scenario.id === applied.scenarioId && scenario.enabled !== false)));
+  return eligible ? origin.topicId : null;
+}
