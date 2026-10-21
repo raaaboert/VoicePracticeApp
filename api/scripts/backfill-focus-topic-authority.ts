@@ -35,7 +35,7 @@ import {
 } from "../src/services/orgDivisions.js";
 import { parseTrainingPackScenarioSelection } from "../src/services/trainingPackScenarioSelection.js";
 import { resolveTrainingContentEligibility } from "../src/services/trainingContentEligibility.js";
-import { createFocusTopicAuthorityStore } from "../src/storage/focusTopicAuthorityStore.js";
+import { createFocusTopicAuthorityStore, FocusTopicBackfillValidationError } from "../src/storage/focusTopicAuthorityStore.js";
 import type { FocusTopicAuthorityStore } from "../src/storage/focusTopicAuthorityStore.js";
 import { createTrainingPackStore } from "../src/storage/trainingPackStore.js";
 
@@ -44,15 +44,31 @@ export interface FocusTopicBackfillCliOptions {
   target: ScriptTargetEnvironment | null;
   confirmProduction: string | null;
   inventoryFile: string | null;
+  validateRunId: string | null;
+  signOffRunId: string | null;
+  operator: string | null;
+  acknowledgeEmpty: boolean;
 }
 
 export function parseFocusTopicBackfillCliOptions(args: readonly string[]): FocusTopicBackfillCliOptions {
-  return {
+  const options = {
     apply: args.includes("--apply"),
     target: parseScriptTarget(arg(args, "target")),
     confirmProduction: arg(args, "confirm-production"),
     inventoryFile: arg(args, "inventory-file"),
+    validateRunId: arg(args, "validate"),
+    signOffRunId: arg(args, "sign-off"),
+    operator: arg(args, "by"),
+    acknowledgeEmpty: args.includes("--acknowledge-empty"),
   };
+  for (const flag of ["validate", "sign-off", "by"]) {
+    if (args.includes(`--${flag}`) && !arg(args, flag)?.trim()) throw new Error(`--${flag} requires a value.`);
+  }
+  if ([options.apply, Boolean(options.validateRunId), Boolean(options.signOffRunId)].filter(Boolean).length > 1) throw new Error("Choose only one of --apply, --validate or --sign-off.");
+  if ((options.validateRunId || options.signOffRunId) && !options.operator?.trim()) throw new Error("--by <operator> is required for validation and sign-off.");
+  if ((options.validateRunId || options.signOffRunId) && options.inventoryFile) throw new Error("Validation/sign-off always use the current database inventory, not --inventory-file.");
+  if (options.acknowledgeEmpty && !options.signOffRunId) throw new Error("--acknowledge-empty is only valid with --sign-off.");
+  return options;
 }
 
 export function assertFocusTopicBackfillTargetSafety(params: {
@@ -63,7 +79,7 @@ export function assertFocusTopicBackfillTargetSafety(params: {
     throw new Error('--target development, --target staging, or --target production is required.');
   }
   const inferredTarget = inferDatabaseTargetEnvironment(params.databaseUrl);
-  if (!params.options.apply) {
+  if (!params.options.apply && !params.options.validateRunId && !params.options.signOffRunId) {
     return resolveGuardedTargetEnvironment({
       operationName: "backfill-focus-topic-authority",
       explicitTarget: params.options.target,
@@ -83,9 +99,10 @@ export async function executeFocusTopicBackfillMode(params: {
   store: Pick<FocusTopicAuthorityStore, "applyBackfillPlan">;
   plan: ReturnType<typeof buildFocusTopicAuthorityBackfillPlan>;
   validTopicKeys: ReadonlySet<string>;
+  targetEnvironment?: ScriptTargetEnvironment;
 }) {
   if (!params.apply) return null;
-  return params.store.applyBackfillPlan({ plan: params.plan, validTopicKeys: params.validTopicKeys });
+  return params.store.applyBackfillPlan({ plan: params.plan, validTopicKeys: params.validTopicKeys, targetEnvironment: params.targetEnvironment });
 }
 
 async function main(): Promise<void> {
@@ -95,6 +112,33 @@ async function main(): Promise<void> {
   const target = assertFocusTopicBackfillTargetSafety({ options, databaseUrl });
   const pool = new Pool({ connectionString: databaseUrl, max: 2, connectionTimeoutMillis: 15_000, idleTimeoutMillis: 10_000, keepAlive: true });
   try {
+    if (options.validateRunId || options.signOffRunId) {
+      const store = createFocusTopicAuthorityStore({ provider: "postgres", databaseUrl, pgPoolMax: 2,
+        pgConnectTimeoutMs: 15_000, pgIdleTimeoutMs: 10_000, queryPool: pool });
+      await store.initialize();
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL lock_timeout = '15s'");
+        // A short operator-only check: keep source inventory and applied rows stable
+        // while comparing them and recording the decision. No API locks are nested.
+        await client.query(`LOCK TABLE app_state, training_packs, org_content_items, org_content_categories,
+          org_content_assignments, org_module_entitlements, focus_topic_assignments,
+          focus_topic_scenario_attachments, org_content_topic_attachments, focus_topic_backfill_runs IN SHARE ROW EXCLUSIVE MODE`);
+        const plan = buildFocusTopicAuthorityBackfillPlan(await buildDatabaseInventory(pool, databaseUrl));
+        const run = options.validateRunId
+          ? await store.markBackfillValidated({ runId: options.validateRunId, validatedBy: options.operator!, plan, targetEnvironment: target }, client)
+          : await store.markBackfillSignedOff({ runId: options.signOffRunId!, signedOffBy: options.operator!, plan, targetEnvironment: target,
+            acknowledgeEmpty: options.acknowledgeEmpty }, client);
+        await client.query("COMMIT");
+        console.log(JSON.stringify({ mode: options.validateRunId ? "validate" : "sign-off", target, run }, null, 2));
+      } catch (error) {
+        // Failed integrity validation is durable and requires an explicit re-APPLY.
+        await client.query(error instanceof FocusTopicBackfillValidationError ? "COMMIT" : "ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+      return;
+    }
     const inventory = options.inventoryFile
       ? JSON.parse(await readFile(path.resolve(options.inventoryFile), "utf8")) as FocusTopicAuthorityBackfillInput
       : await buildDatabaseInventory(pool, databaseUrl);
@@ -109,7 +153,7 @@ async function main(): Promise<void> {
       pgConnectTimeoutMs: 15_000, pgIdleTimeoutMs: 10_000, queryPool: pool,
     });
     const validTopicKeys = new Set(inventory.topics.map((topic) => `${topic.orgId}:${topic.id}`));
-    const run = await executeFocusTopicBackfillMode({ apply: true, store, plan, validTopicKeys });
+    const run = await executeFocusTopicBackfillMode({ apply: true, store, plan, validTopicKeys, targetEnvironment: target });
     console.log(JSON.stringify({ mode: "apply", target, run, plan: plan.summary, shadow }, null, 2));
   } finally {
     await pool.end();
@@ -148,7 +192,7 @@ async function buildDatabaseInventory(pool: Pool, databaseUrl: string): Promise<
     archivedAt: row.archived_at,
   })) as TrainingContentItem[];
   const trainingPackStore = createTrainingPackStore({
-    provider: "postgres", dbPath: "", databaseUrl,
+    provider: "postgres", databaseUrl,
     pgPoolMax: 2, pgConnectTimeoutMs: 15_000, pgIdleTimeoutMs: 10_000,
     queryPool: pool,
   });

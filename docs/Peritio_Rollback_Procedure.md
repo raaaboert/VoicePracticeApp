@@ -8,6 +8,15 @@ code rollback and a database restore are different operations.
 > against the newer schema. Restore data only for a confirmed data incident and
 > follow [Peritio Recovery Runbook](./Peritio_Recovery_Runbook.md).
 
+**Modernization exception:** additive schema alone does not make the frozen original
+production revision `aa79a9d1fbac6704eb1d0033af81c6342538073d` safe against modernized
+data. Its startup repair can modify newly valid manager relationships. Do not launch
+that revision on the upgraded database without a specifically rehearsed compatibility
+plan. See the R1 cutover section of the staging/production runbook. Production currently
+contains friends/family test history, not paying-customer records; prefer a quiet,
+owner-approved release window and forward correction over an elaborate historical
+conversion. This does not authorize a reset or restore.
+
 ## Before Any Rollback
 
 1. Identify the failing surface, deployed Git SHA, last known-good SHA, onset
@@ -55,13 +64,26 @@ The direct Focus Topic learner-authority implementation defaults to
 validated and signed off. Assignment-mode startup fails closed without that
 state; this code release does not change the deployed setting.
 
-For an emergency authority rollback, set `FOCUS_TOPIC_AUTHORITY=legacy` and
+Only for a separately approved, rehearsed authority rollback on compatible modern
+code, set `FOCUS_TOPIC_AUTHORITY=legacy` and
 verify the legacy Focus Topic catalog and launch flow. Legacy Training Pack
 assignment and attachment data remains intact. New direct Topic assignments
 created after the cutover are **not** dual-written to the legacy Pack model and
 may be ignored while legacy mode is active. Preserve those SQL rows and recorded
 session attribution for a later recovery or return to assignment mode; do not
 restore PostgreSQL merely to change the authority setting.
+
+Industry enforcement remains active in the combined revision even in legacy mode.
+Changing the authority setting does not disable enforcement or make older installed
+clients/session data compatible. Keep access quiet while recovering; do not guess
+an authority fallback during an incident.
+
+For a failed R1 single-revision cutover, keep testers out and preserve diagnostics.
+Prefer a narrowly tested forward fix. If deep rollback to the frozen baseline is
+necessary, stop for owner approval of a coordinated old-code + verified pre-cutover
+database restore, including loss of any later test writes and matching environment
+settings. Test that combination on a disposable restore first. Do not restart the old
+application on current data as a trial, and do not wipe current records automatically.
 
 ## Video Worker Rollback
 
@@ -173,9 +195,8 @@ Stop and escalate if:
 ## Repository Documentation Drift To Verify
 
 [Peritio Staging And Production Runbook](./Peritio_Staging_Production_Runbook.md)
-still describes staging and production as potentially deploying from `main` and
-contains historical web-surface deployment status. The current validated
-release flow uses `staging` for staging promotion and `main` for production
-promotion. Treat provider branch/deployment mappings as a manual verification
-item until the older runbook is deliberately refreshed; this documentation task
-does not alter it.
+includes an explicit R1 cutover procedure and retains marked historical branch/web
+deployment notes. Verify actual Render/Vercel branch, auto-deploy, revision-selection
+and environment settings at release/incident time. Intended `staging`/`main` mappings
+are not live provider evidence. No release or environment change is authorized by
+these documentation updates.

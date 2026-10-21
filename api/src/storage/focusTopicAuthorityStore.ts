@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
 import { Pool, type PoolClient } from "pg";
 
 import type { StorageProvider } from "../runtimeConfig.js";
+import { inferDatabaseTargetEnvironment, type ScriptTargetEnvironment } from "../productionSafety.js";
 import type { FocusTopicAssignment } from "../services/focusTopicAuthority.js";
 import {
   FOCUS_TOPIC_AUTHORITY_BACKFILL_VERSION,
@@ -51,18 +53,24 @@ export interface FocusTopicAuthorityStore {
   applyBackfillPlan(input: {
     plan: FocusTopicAuthorityBackfillPlan;
     validTopicKeys: ReadonlySet<string>;
+    targetEnvironment?: ScriptTargetEnvironment;
   }): Promise<FocusTopicBackfillRunRecord>;
   hasTopicReferences(orgId: string, topicId: string): Promise<boolean>;
   markBackfillValidated(input: {
     runId: string;
     validatedBy: string;
+    plan: FocusTopicAuthorityBackfillPlan;
+    targetEnvironment: ScriptTargetEnvironment;
     at?: Date;
-  }): Promise<FocusTopicBackfillRunRecord>;
+  }, client?: Pick<PoolClient, "query">): Promise<FocusTopicBackfillRunRecord>;
   markBackfillSignedOff(input: {
     runId: string;
     signedOffBy: string;
+    plan: FocusTopicAuthorityBackfillPlan;
+    targetEnvironment: ScriptTargetEnvironment;
+    acknowledgeEmpty?: boolean;
     at?: Date;
-  }): Promise<FocusTopicBackfillRunRecord>;
+  }, client?: Pick<PoolClient, "query">): Promise<FocusTopicBackfillRunRecord>;
 }
 
 const ACTIVE_ASSIGNMENT_UNIQUE_CONSTRAINTS = new Set([
@@ -88,6 +96,10 @@ export function isDuplicateActiveFocusTopicContentAttachmentError(error: unknown
 }
 
 type QueryPool = Pick<Pool, "query" | "connect">;
+
+export class FocusTopicBackfillValidationError extends Error {
+  constructor(cause: unknown) { super(cause instanceof Error ? cause.message : "Backfill validation failed.", { cause }); }
+}
 
 class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   async initialize(): Promise<void> {}
@@ -117,7 +129,7 @@ class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
 
 class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   private initialized: Promise<void> | null = null;
-  constructor(private readonly pool: QueryPool) {}
+  constructor(private readonly pool: QueryPool, private readonly databaseUrl: string) {}
 
   async initialize(): Promise<void> {
     if (!this.initialized) this.initialized = initializeSchema(this.pool);
@@ -140,8 +152,18 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
       || !["assignmentCount", "scenarioAttachmentCount", "contentAttachmentCount"].every(
         (key) => Number.isSafeInteger(run.result_summary[key]) && Number(run.result_summary[key]) >= 0
       )
-      || Number(run.result_summary.assignmentCount) === 0) {
+      || (Number(run.result_summary.assignmentCount) === 0 && !validEmptyAcknowledgment(run))) {
       throw new Error("Focus Topic assignment authority requires a valid, signed-off backfill APPLY run for the expected schema and version.");
+    }
+    const evidence = run.result_summary.validation as ValidationEvidence | undefined;
+    // Older nonempty signed-off runs retain their existing readiness contract.
+    if (evidence || run.result_summary.targetEnvironment !== undefined || run.result_summary.databaseIdentity !== undefined
+      || Number(run.result_summary.assignmentCount) === 0) {
+      if (!validEvidence(run) || run.result_summary.targetEnvironment !== (inferDatabaseTargetEnvironment(this.databaseUrl) ?? run.result_summary.targetEnvironment)
+        || run.result_summary.databaseIdentity !== await databaseIdentity(this.pool)
+        || await persistedRowsFingerprint(this.pool, evidence!) !== evidence!.rowsFingerprint) {
+        throw new Error("Focus Topic assignment authority validation evidence is inconsistent or stale.");
+      }
     }
     const counts = await this.pool.query<{
       assignment_count: string; scenario_count: string; content_count: string;
@@ -257,6 +279,7 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   async applyBackfillPlan(input: {
     plan: FocusTopicAuthorityBackfillPlan;
     validTopicKeys: ReadonlySet<string>;
+    targetEnvironment?: ScriptTargetEnvironment;
   }): Promise<FocusTopicBackfillRunRecord> {
     await this.initialize();
     assertPlanTopics(input.plan, input.validTopicKeys);
@@ -270,17 +293,38 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
       for (const row of input.plan.assignments) await insertAssignment(client, row);
       for (const row of input.plan.scenarioAttachments) await insertScenario(client, row);
       for (const row of input.plan.contentAttachments) await insertContent(client, row);
+      const binding = input.targetEnvironment ? {
+        targetEnvironment: input.targetEnvironment, databaseIdentity: await databaseIdentity(client),
+      } : {};
       const runId = `ftbr_${input.plan.inputFingerprint.slice(0, 32)}`;
+      const latestRunId = (await client.query<{ id: string }>(
+        "SELECT id FROM focus_topic_backfill_runs ORDER BY executed_at DESC, id DESC LIMIT 1",
+      )).rows[0]?.id ?? null;
+      const preserveReview = "focus_topic_backfill_runs.id = $7 AND focus_topic_backfill_runs.result_summary->'validation'->>'status' = 'passed'";
       const run = await client.query<BackfillRunRow>(
         `INSERT INTO focus_topic_backfill_runs (
            id, run_version, mode, schema_generation, input_fingerprint, result_summary,
            executed_at, validated_at, validated_by, signed_off_at, signed_off_by
          ) VALUES ($1, $2, 'apply', $3, $4, $5::jsonb, $6, NULL, NULL, NULL, NULL)
          ON CONFLICT (run_version, schema_generation, input_fingerprint) DO UPDATE
-           SET result_summary = EXCLUDED.result_summary
+           SET result_summary = CASE WHEN ${preserveReview}
+             THEN focus_topic_backfill_runs.result_summary
+             ELSE EXCLUDED.result_summary || jsonb_build_object('priorValidationFailures',
+               COALESCE(focus_topic_backfill_runs.result_summary->'priorValidationFailures', '[]'::jsonb)
+               || CASE WHEN focus_topic_backfill_runs.result_summary->'validation'->>'status' = 'failed'
+                 THEN jsonb_build_array(focus_topic_backfill_runs.result_summary->'validation') ELSE '[]'::jsonb END,
+               'priorSignOffs', COALESCE(focus_topic_backfill_runs.result_summary->'priorSignOffs', '[]'::jsonb)
+                 || CASE WHEN focus_topic_backfill_runs.signed_off_at IS NOT NULL THEN jsonb_build_array(jsonb_build_object(
+                   'at', focus_topic_backfill_runs.signed_off_at, 'by', focus_topic_backfill_runs.signed_off_by,
+                   'validation', focus_topic_backfill_runs.result_summary->'validation')) ELSE '[]'::jsonb END) END,
+             executed_at = CASE WHEN ${preserveReview} THEN focus_topic_backfill_runs.executed_at ELSE EXCLUDED.executed_at END,
+             validated_at = CASE WHEN ${preserveReview} THEN focus_topic_backfill_runs.validated_at ELSE NULL END,
+             validated_by = CASE WHEN ${preserveReview} THEN focus_topic_backfill_runs.validated_by ELSE NULL END,
+             signed_off_at = CASE WHEN ${preserveReview} THEN focus_topic_backfill_runs.signed_off_at ELSE NULL END,
+             signed_off_by = CASE WHEN ${preserveReview} THEN focus_topic_backfill_runs.signed_off_by ELSE NULL END
          RETURNING *`,
         [runId, input.plan.version, input.plan.schemaGeneration, input.plan.inputFingerprint,
-          JSON.stringify(input.plan.summary), input.plan.capturedAt]
+          JSON.stringify({ ...input.plan.summary, ...binding }), new Date(), latestRunId]
       );
       await client.query("COMMIT");
       return mapRun(requiredRow(run.rows[0], "Backfill run"));
@@ -305,24 +349,125 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
     return result.rows[0]?.referenced === true;
   }
 
-  async markBackfillValidated(input: { runId: string; validatedBy: string; at?: Date }): Promise<FocusTopicBackfillRunRecord> {
-    await this.initialize();
-    const result = await this.pool.query<BackfillRunRow>(
-      `UPDATE focus_topic_backfill_runs SET validated_at = $2, validated_by = $3
-       WHERE id = $1 RETURNING *`,
-      [requiredId(input.runId, "Run id"), input.at ?? new Date(), requiredId(input.validatedBy, "Validator")]
-    );
-    return mapRun(requiredRow(result.rows[0], "Backfill run"));
+  async markBackfillValidated(input: Parameters<FocusTopicAuthorityStore["markBackfillValidated"]>[0], client?: Pick<PoolClient, "query">): Promise<FocusTopicBackfillRunRecord> {
+    return this.reviewBackfill(input, false, client);
   }
 
-  async markBackfillSignedOff(input: { runId: string; signedOffBy: string; at?: Date }): Promise<FocusTopicBackfillRunRecord> {
+  async markBackfillSignedOff(input: Parameters<FocusTopicAuthorityStore["markBackfillSignedOff"]>[0], client?: Pick<PoolClient, "query">): Promise<FocusTopicBackfillRunRecord> {
+    return this.reviewBackfill(input, true, client);
+  }
+
+  private async reviewBackfill(
+    input: Parameters<FocusTopicAuthorityStore["markBackfillValidated"]>[0] | Parameters<FocusTopicAuthorityStore["markBackfillSignedOff"]>[0],
+    signOff: boolean, suppliedClient?: Pick<PoolClient, "query">,
+  ): Promise<FocusTopicBackfillRunRecord> {
     await this.initialize();
-    const result = await this.pool.query<BackfillRunRow>(
-      `UPDATE focus_topic_backfill_runs SET signed_off_at = $2, signed_off_by = $3
-       WHERE id = $1 AND validated_at IS NOT NULL RETURNING *`,
-      [requiredId(input.runId, "Run id"), input.at ?? new Date(), requiredId(input.signedOffBy, "Signer")]
+    const at = input.at ?? new Date();
+    const actor = requiredId("signedOffBy" in input ? input.signedOffBy : input.validatedBy, "Operator");
+    const client = suppliedClient ?? await this.pool.connect();
+    let validationError: unknown;
+    try {
+      if (!suppliedClient) await client.query("BEGIN");
+      const run = requiredRow((await client.query<BackfillRunRow>(
+        "SELECT * FROM focus_topic_backfill_runs WHERE id = $1 FOR UPDATE", [requiredId(input.runId, "Run id")],
+      )).rows[0], "Backfill run");
+      if (run.result_summary.targetEnvironment !== input.targetEnvironment
+        || run.result_summary.databaseIdentity !== await databaseIdentity(client)) throw new Error("Backfill run environment/database mismatch; use the APPLY run from this target.");
+      if ((run.result_summary.validation as ValidationEvidence | undefined)?.status === "failed") {
+        throw new Error("Backfill validation previously failed; repair the cause and explicitly APPLY again before validating.");
+      }
+      try {
+        const latest = (await client.query<{ id: string }>("SELECT id FROM focus_topic_backfill_runs ORDER BY executed_at DESC, id DESC LIMIT 1")).rows[0];
+        assertRunMatchesPlan(run, input.plan);
+        if (latest?.id !== run.id) throw new Error("Backfill run is not the latest APPLY run.");
+        const evidence = planEvidence(input.plan, at, actor);
+        if (await persistedRowsFingerprint(client, evidence, true) !== evidence.rowsFingerprint) {
+          throw new Error("Backfill rows are incomplete or do not match the current plan.");
+        }
+        if (signOff) {
+          if (!validEvidence(run) || !run.validated_at || !run.validated_by) throw new Error("Successful backfill validation is required before sign-off.");
+          if (evidence.rowsFingerprint !== (run.result_summary.validation as ValidationEvidence).rowsFingerprint) throw new Error("Backfill validation evidence is stale.");
+          if (input.plan.summary.assignmentCount === 0 && !validEmptyAcknowledgment(run)) {
+            if (!("acknowledgeEmpty" in input && input.acknowledgeEmpty)) throw new Error("Empty backfill requires explicit --acknowledge-empty at sign-off.");
+            run.result_summary.emptyAcknowledgment = { by: actor, at: at.toISOString() };
+          }
+        } else {
+          if (run.validated_at && !validEvidence(run)) throw new Error("Existing backfill validation evidence is inconsistent.");
+          if (!run.validated_at) run.result_summary.validation = evidence;
+        }
+      } catch (error) {
+        if (signOff) throw error;
+        // Commit a failed validation, never silently overwrite it on a later --validate.
+        run.result_summary.validation = { status: "failed", by: actor, at: at.toISOString(), reason: "integrity_check_failed" };
+        validationError = error;
+      }
+      const result = await client.query<BackfillRunRow>(
+        `UPDATE focus_topic_backfill_runs SET result_summary=$2::jsonb,
+          validated_at=$3, validated_by=$4, signed_off_at=$5, signed_off_by=$6 WHERE id=$1 RETURNING *`,
+        [run.id, JSON.stringify(run.result_summary), validationError ? null : (run.validated_at ?? (signOff ? null : at)),
+          validationError ? null : (run.validated_by ?? (signOff ? null : actor)),
+          validationError ? null : (run.signed_off_at ?? (signOff ? at : null)),
+          validationError ? null : (run.signed_off_by ?? (signOff ? actor : null))],
+      );
+      if (!suppliedClient) await client.query("COMMIT");
+      if (validationError) throw new FocusTopicBackfillValidationError(validationError);
+      return mapRun(requiredRow(result.rows[0], "Backfill run"));
+    } catch (error) {
+      if (!suppliedClient && !validationError) await rollbackQuietly(client);
+      throw error;
+    } finally {
+      if (!suppliedClient) (client as PoolClient).release();
+    }
+  }
+}
+
+interface ValidationEvidence {
+  status: "passed" | "failed"; at: string; by: string; inputFingerprint: string;
+  assignmentIds: string[]; scenarioIds: string[]; contentIds: string[]; rowsFingerprint: string;
+}
+async function databaseIdentity(client: Pick<PoolClient, "query">): Promise<string> {
+  const row = requiredRow((await client.query("SELECT current_database() AS database, current_schema() AS schema")).rows[0], "Database identity");
+  return hash(row);
+}
+function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+function identities(snapshot: FocusTopicAuthoritySnapshot) {
+  return {
+    assignments: snapshot.assignments.map(r => [r.id, r.orgId, r.topicId, r.audience, r.subjectUserId, r.grantsManagement]).sort(),
+    scenarios: snapshot.scenarioAttachments.map(r => [r.id, r.orgId, r.topicId, r.scenarioKind, r.scenarioId]).sort(),
+    content: snapshot.contentAttachments.map(r => [r.id, r.orgId, r.topicId, r.contentId]).sort(),
+  };
+}
+function planEvidence(plan: FocusTopicAuthorityBackfillPlan, at: Date, by: string): ValidationEvidence {
+  return { status: "passed", at: at.toISOString(), by, inputFingerprint: plan.inputFingerprint,
+    assignmentIds: plan.assignments.map(r => r.id), scenarioIds: plan.scenarioAttachments.map(r => r.id),
+    contentIds: plan.contentAttachments.map(r => r.id), rowsFingerprint: hash(identities(plan)) };
+}
+async function persistedRowsFingerprint(client: Pick<PoolClient, "query">, evidence: ValidationEvidence, activeOnly = false): Promise<string> {
+  const assignments = await client.query<AssignmentRow>(`SELECT * FROM focus_topic_assignments WHERE id=ANY($1::text[])${activeOnly ? " AND revoked_at IS NULL" : ""}`, [evidence.assignmentIds]);
+  const scenarios = await client.query<ScenarioRow>(`SELECT * FROM focus_topic_scenario_attachments WHERE id=ANY($1::text[])${activeOnly ? " AND detached_at IS NULL" : ""}`, [evidence.scenarioIds]);
+  const content = await client.query<ContentRow>(`SELECT * FROM org_content_topic_attachments WHERE id=ANY($1::text[])${activeOnly ? " AND detached_at IS NULL" : ""}`, [evidence.contentIds]);
+  return hash(identities({ assignments: assignments.rows.map(mapAssignment), scenarioAttachments: scenarios.rows.map(mapScenario), contentAttachments: content.rows.map(mapContent) }));
+}
+function validEvidence(run: BackfillRunRow): boolean {
+  const evidence = run.result_summary.validation as ValidationEvidence | undefined;
+  return evidence?.status === "passed" && evidence.inputFingerprint === run.input_fingerprint
+    && evidence.by === run.validated_by && evidence.at === optionalIso(run.validated_at)
+    && /^[a-f0-9]{64}$/.test(evidence.rowsFingerprint)
+    && [[evidence.assignmentIds, "assignmentCount"], [evidence.scenarioIds, "scenarioAttachmentCount"], [evidence.contentIds, "contentAttachmentCount"]].every(
+      ([ids, key]) => Array.isArray(ids) && ids.every(id => typeof id === "string") && new Set(ids).size === ids.length && ids.length === run.result_summary[key as string],
     );
-    return mapRun(requiredRow(result.rows[0], "Validated backfill run"));
+}
+function validEmptyAcknowledgment(run: BackfillRunRow): boolean {
+  const acknowledgment = run.result_summary.emptyAcknowledgment as { by?: string; at?: string } | undefined;
+  return Boolean(acknowledgment?.by && acknowledgment.by === run.signed_off_by && acknowledgment.at === optionalIso(run.signed_off_at) && validEvidence(run));
+}
+function assertRunMatchesPlan(run: BackfillRunRow, plan: FocusTopicAuthorityBackfillPlan): void {
+  if (run.mode !== "apply" || run.run_version !== FOCUS_TOPIC_AUTHORITY_BACKFILL_VERSION || run.schema_generation !== FOCUS_TOPIC_AUTHORITY_SCHEMA_GENERATION
+    || run.input_fingerprint !== plan.inputFingerprint || !/^[a-f0-9]{64}$/.test(run.input_fingerprint)
+    || plan.issues.length || !Object.entries(plan.summary).every(([key, value]) => Number.isSafeInteger(value) && value >= 0 && run.result_summary[key] === value)
+    || plan.summary.issueCount !== 0 || plan.summary.assignmentCount !== plan.assignments.length
+    || plan.summary.scenarioAttachmentCount !== plan.scenarioAttachments.length || plan.summary.contentAttachmentCount !== plan.contentAttachments.length) {
+    throw new Error("Backfill APPLY result is failed, incomplete, issue-bearing or stale relative to the current inventory.");
   }
 }
 
@@ -425,5 +570,5 @@ export function createFocusTopicAuthorityStore(params: {
     connectionTimeoutMillis: params.pgConnectTimeoutMs,
     idleTimeoutMillis: params.pgIdleTimeoutMs, keepAlive: true,
   });
-  return new PostgresFocusTopicAuthorityStore(pool);
+  return new PostgresFocusTopicAuthorityStore(pool, params.databaseUrl);
 }

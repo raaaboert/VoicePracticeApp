@@ -76,6 +76,5 @@ test("backfill apply is transactional and idempotent while validation and signof
   assert.equal(queries.filter((query)=>query==="COMMIT").length,3);
   assert.equal(queries.some((query)=>/ON CONFLICT \(id\) DO NOTHING/.test(query)),true);
   assert.equal(queries.some((query)=>/ON CONFLICT \(run_version, schema_generation, input_fingerprint\)/.test(query)),true);
-  await assert.rejects(store.markBackfillSignedOff({runId:first.id,signedOffBy:"reviewer"}),/Validated backfill run was not found/);
-  assert.equal(queries.some((query)=>/validated_at IS NOT NULL/.test(query)),true);
+  assert.equal(queries.some((query)=>/SET validated_at =/.test(query)),false, "APPLY never automatically validates or signs off");
 });

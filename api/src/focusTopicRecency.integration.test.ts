@@ -110,10 +110,18 @@ test("local PostgreSQL HTTP Topic origin, completed-practice recency, isolation 
       assert.equal((await start(b.id, standard.id, null, started.body.simulationSessionId)).status, 409);
       const first = await complete(started);
       assert.equal(first.status, 201, JSON.stringify(first.body));
-      assert.equal((await complete(started)).status, 201);
-      const rows = await local.pool.query("SELECT origin_topic_id,training_id,raw_duration_seconds FROM usage_sessions WHERE user_id=$1", [user.id]);
+      const repeated = await complete(started);
+      assert.equal(repeated.status, 201);
+      assert.equal(repeated.body.billedSecondsAdded, 0);
+      const rows = await local.pool.query("SELECT origin_topic_id,training_id,raw_duration_seconds,started_at,ended_at,usage_source FROM usage_sessions WHERE user_id=$1", [user.id]);
       assert.equal(rows.rows.length, 1); assert.equal(rows.rows[0].origin_topic_id, a.id);
-      assert.equal(rows.rows[0].training_id, null); assert.equal(rows.rows[0].raw_duration_seconds, 0);
+      assert.equal(rows.rows[0].training_id, null);
+      // Completion submits actual elapsed seconds; full-suite scheduling may take
+      // longer than one second. Verify exact persisted duration, not assumed speed.
+      assert.equal(rows.rows[0].raw_duration_seconds, Math.floor(
+        (new Date(rows.rows[0].ended_at).getTime() - new Date(rows.rows[0].started_at).getTime()) / 1000));
+      assert.equal(rows.rows[0].usage_source, "client_completed");
+      assert.equal(repeated.body.entitlements.usage.rawSecondsToday, first.body.entitlements.usage.rawSecondsToday);
       const raceId = randomUUID();
       const simultaneous = await Promise.allSettled([a.id, b.id].map(originTopicId =>
         createSimulationSessionStore(options).upsertStartedSession({ ...persisted!, simulationSessionId: raceId, originTopicId })));

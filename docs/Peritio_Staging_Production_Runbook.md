@@ -6,7 +6,7 @@
 >
 > `main` is frozen at `aa79a9d1fbac6704eb1d0033af81c6342538073d`, identified by annotated tag `pre-performance-intelligence-baseline-2026-09-21`. Do not merge, rebase, fast-forward, or otherwise promote Phase 0, Phase 1A, Phase 1B, or any later individual phase into `main`. Production promotion may occur only after the complete modernization initiative is accepted in staging and explicit production-cutover approval is given. [`Peritio_Phase_0_Baseline.md`](./Peritio_Phase_0_Baseline.md) and [`Peritio_Phase_0_Decisions.md`](./Peritio_Phase_0_Decisions.md) are authoritative over this runbook's normal/default workflow during that period.
 
-Last updated: 2026-07-13
+Last updated: 2026-10-21
 
 ## Environment Map
 
@@ -29,6 +29,135 @@ Batch 9E.1 authentication requires a separately applied additive migration befor
 
 Production API deploys are manual only. Do not enable production auto-deploy. Do not deploy production unless the operator explicitly asks for a production deploy and the production verification checklist below is complete.
 
+## R1 controlled modernization cutover (owner approval required)
+
+There are currently no paying/live business customers; production history belongs to
+friends/family testers. Do not build a historical-data conversion or reset that is
+unnecessary for launch. **Nothing here authorizes production writes or data deletion.**
+The normal backfill supports an empty legacy assignment inventory without deleting
+old test scores/sessions. Whether production actually has an empty inventory remains
+unverified until an authorized operator runs PLAN against that database.
+
+The combined candidate enables industry enforcement immediately; there is no
+separate enforcement flag. The two-revision/48-hour procedure below remains the
+default when existing sessions must continue. A **single-revision maintenance-window
+release is a reasonable alternative only with explicit owner approval** to forgo
+continuation of obsolete test sessions, no active/in-flight simulations, coordinated
+tester inactivity, a verified recovery point, and checks before reopening access.
+This is an explicit alternative to the compatibility drain, not proof that it has
+already occurred. If anyone needs session continuation or access cannot be held
+quiet, use the two-revision procedure instead. Do not silently switch authority mode.
+
+Execute from the repository root using the approved candidate checkout and its
+installed dependencies. Commands below are operator instructions, not actions
+performed by Batch R1. `DATABASE_URL` must be set **only in the operator process**
+to the separately verified production connection; never copy it into a command log.
+
+1. Record the approved candidate's full SHA and confirm its ancestry from frozen
+   baseline `aa79a9d1fbac6704eb1d0033af81c6342538073d`. Verify actual API/worker Git
+   branches, auto-deploy controls and independently selectable revision support in
+   Render; repository mappings are not proof of live settings. Keep auto-deploy off.
+2. Verify production service/environment identity, `STORAGE_PROVIDER=postgres`,
+   database name/host and separation from staging. Confirm with a read-only
+   `SELECT current_database(), current_schema();` using the authorized connection.
+   Confirm a usable backup/restore point and a tested scratch restore before writes.
+3. Agree the maintenance window and keep testers out until verification finishes,
+   using only controls verified to exist. Check actual `simulation_sessions` columns
+   with `information_schema.columns` before querying them. Where `status` and
+   `last_seen_at` exist, inspect:
+
+   ```sql
+   SELECT COUNT(*) AS recently_unfinished
+   FROM simulation_sessions
+   WHERE status = 'started' AND last_seen_at >= NOW() - INTERVAL '48 hours';
+   ```
+
+   Also confirm with testers that no unregistered/older-client simulation or provider
+   request is in flight. A table count alone cannot prove this. Stop on active work.
+   Do not delete old sessions to make a readiness query pass. If historical unfinished
+   tests obstruct the release, ask the owner for a specific disposition; never reset
+   production automatically.
+4. Verify the actual running authority mode and revision. Run the read-only effective
+   industry audit below for every active organization. Stop for an owner decision on
+   zero-effective-industry accounts. Record whether this is the approved one-window
+   alternative or the independently verified snapshot/mode/48-hour drain path.
+5. Apply mandatory authentication migration 024, with separately approved database
+   write authorization, **before** starting new API code:
+
+   ```bash
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f api/sql/024_auth_verification.sql
+   npm run db:migrate-training-packs --workspace api -- --target production
+   npm run db:migrate-training-packs --workspace api -- --apply --target production --confirm-production "I understand this writes to production"
+   ```
+
+   Review the Training Pack inspection before APPLY. Verify the required independent
+   authentication secrets/delivery settings using the linked authentication runbook.
+   `AI_SPEND_LEDGER_MODE` stays off. Do **not** apply dormant migration 025.
+6. With legacy writers/test activity still quiet, PLAN using the candidate tooling:
+
+   ```bash
+   npm run db:backfill-focus-topic-authority --workspace api -- --target production
+   ```
+
+   Review `plan.summary`, integrity issues, shadow differences and required-scenario
+   subset broadening. Verify the organizations/Topics/users represented and whether
+   zero assignments truly means no legacy learner visibility. Do not use a fabricated
+   empty inventory or delete relations to bypass issues. PLAN makes no authority writes.
+7. Apply only the reviewed current database inventory, then record the returned
+   `run.id` as `<runId>`. APPLY initializes the existing additive Topic schema and
+   writes deterministic relations in one transaction; it never approves itself:
+
+   ```bash
+   npm run db:backfill-focus-topic-authority --workspace api -- --apply --target production --confirm-production "I understand this writes to production"
+   npm run db:backfill-focus-topic-authority --workspace api -- --validate <runId> --by "operator name" --target production --confirm-production "I understand this writes to production"
+   ```
+
+   Validation rebuilds the current **database** inventory, checks run version,
+   environment/database binding, fingerprint, counts and actual applied row identities.
+   Source/authority tables are locked during this short operator check (15-second lock
+   timeout). Keep the maintenance window quiet. A changed inventory, missing/mismatched
+   rows, unresolved integrity issues, invalid run or stale APPLY is not ready.
+8. Sign-off is a separate human decision, after reviewing successful validation:
+
+   ```bash
+   npm run db:backfill-focus-topic-authority --workspace api -- --sign-off <runId> --by "owner/operator name" --target production --confirm-production "I understand this writes to production"
+   ```
+
+   For **zero assignments only**, explicitly acknowledge the verified empty result:
+
+   ```bash
+   npm run db:backfill-focus-topic-authority --workspace api -- --sign-off <runId> --by "owner/operator name" --acknowledge-empty --target production --confirm-production "I understand this writes to production"
+   ```
+
+   Operator identity/times, successful evidence and the empty acknowledgment are durable
+   in the existing backfill record. Repeat successful commands preserve their original
+   attribution/timestamps. Failed validation is recorded, cannot be silently overwritten
+   by another VALIDATE, and cannot be signed off. Repair the cause, review PLAN, explicitly
+   APPLY again, then validate/sign off; prior failures remain recorded. Returning to an
+   older inventory after a newer APPLY also requires fresh validation/sign-off.
+9. Only after these gates and explicit cutover approval, select the approved production
+   revision and set `FOCUS_TOPIC_AUTHORITY=assignments` in the actual service configuration.
+   Verify the mode is saved/active. Deploy/restart deliberately; do not use an uncontrolled
+   auto-deploy window. The first assignments-mode startup verifies the latest APPLY,
+   validation, sign-off, row evidence and (for empty runs) acknowledgment. Subsequent
+   revocations remain valid historical rows; deleted/replaced baseline rows fail closed.
+10. Watch startup logs and verify `/health`, `/ready`, `/meta/environment`, deployed SHA
+    and actual authority mode. Exercise authentication/verification, assigned Topic and
+    resource-only visibility, published scenario launch/registration, one bounded
+    simulation/score/recovery and reporting under authorized tester accounts. Confirm
+    no cross-org access and no unexpected minute/accounting or industry behavior. Only
+    reopen tester access after these checks pass.
+
+**Stop/recovery:** no usable restore point, wrong database/environment, active sessions,
+unapproved industry gaps, nonzero backfill issues, validation/sign-off failure, readiness
+failure or destructive startup warnings means keep access quiet and stop. Prefer a narrow
+forward correction. The old baseline's startup repair can change manager relationships
+created under the modernized model: rolling code back to `aa79a9d...` against the upgraded
+database is **not automatically safe**. Use the reviewed recovery process below; a coordinated
+restore of the verified pre-cutover backup and old code may be needed if deep rollback is
+chosen, with explicit owner approval and known loss of post-backup test writes. Never
+restore or delete production data merely to silence startup checks.
+
 ## Retired Focus Topic reminder schedule
 
 Focus Topic assignments have no due dates, and Focus Topic deadline reminders are retired. Disable or delete any external scheduler that invokes `npm run run:focus-topic-reminders --workspace @voicepractice/api`.
@@ -39,7 +168,8 @@ The command remains temporarily as a credential-free, side-effect-free compatibi
 
 Industry enforcement has **no separate feature flag**. Deploying `c608bf0` or a later combined staging revision activates it immediately, including in legacy authority mode. Such a revision cannot serve as the first, snapshot-only production deployment.
 
-Use two independently approved production release revisions:
+Unless the owner explicitly approves the no-active-session R1 maintenance-window
+alternative above, use two independently approved production release revisions:
 
 1. **Snapshot support first:** prepare and validate a production release containing the snapshot schema/runtime prerequisites and corrections, excluding organization-industry enforcement. `ac8fce2` is a source reference for the prerequisites, not an approved production release. Keep enforcement absent from this first revision. Record its exact deployed SHA and healthy startup.
 2. **Verify the running mode:** inspect the actual production service Environment and deployed revision. Snapshot continuation requires `FOCUS_TOPIC_AUTHORITY=assignments`. Documentation defaults and a zero NULL count cannot establish this. If production is still `legacy`, stop for a separately approved authority cutover; do not switch it automatically.
@@ -77,7 +207,7 @@ Use two independently approved production release revisions:
 
 5. **Enforcement second:** only after revision/mode/drain/audit gates pass and production approval is explicit, deploy the separate tested enforcement revision. Check readiness and authorized new-launch behavior as well as continuation of a legitimate snapshotted session. Preserve the first revision as the rollback reference.
 
-**Release mechanism blocker:** `main` remains frozen and there is no enforcement toggle. Before production rollout, the owner must authorize and establish two independently selectable release revisions (a verified provider pinned-revision/artifact mechanism, or an approved release branch with manual deploys). Verify the service can actually deploy each revision independently; do not assume Render supports a particular pinning control. If only “deploy latest tracked branch” is available and the combined revision would be first, stop until the snapshot-only release line exists. This task creates neither production releases nor authority cutovers.
+**Two-revision release mechanism gate:** `main` remains frozen and there is no enforcement toggle. For this compatibility-preserving path, the owner must authorize and establish two independently selectable release revisions (a verified provider pinned-revision/artifact mechanism, or an approved release branch with manual deploys). Verify the service can actually deploy each revision independently; do not assume Render supports a particular pinning control. If only “deploy latest tracked branch” is available, stop until the snapshot-only release line exists or the owner explicitly approves the R1 no-active-session maintenance-window alternative. These instructions create neither production releases nor authority cutovers.
 
 Read-only pre-8B.8B.1 observations on 2026-10-14: staging `/meta/environment` served `c608bf0ba1c0364a68eeac9b9432c622e8a5561c`; production served frozen `aa79a9d1fbac6704eb1d0033af81c6342538073d`. The owner separately confirmed active staging assignments mode. Public metadata does not expose authority mode, tracked branch, or auto-deploy controls. The repository `render.yaml` defines a staging video worker, not the API services; verify actual API and worker branch/auto-deploy settings in Render before each production release. The mappings in the supersession notice are intended mappings, not live provider verification.
 
