@@ -9,6 +9,7 @@ import type { FocusTopicAssignment } from "../services/focusTopicAuthority.js";
 import {
   FOCUS_TOPIC_AUTHORITY_BACKFILL_VERSION,
   FOCUS_TOPIC_AUTHORITY_SCHEMA_GENERATION,
+  FOCUS_TOPIC_BACKFILL_ACTOR,
 } from "../services/focusTopicAuthorityBackfill.js";
 import type {
   FocusTopicAuthorityBackfillPlan,
@@ -101,6 +102,10 @@ export class FocusTopicBackfillValidationError extends Error {
   constructor(cause: unknown) { super(cause instanceof Error ? cause.message : "Backfill validation failed.", { cause }); }
 }
 
+export function assertBackfillRunNotFinalized(signedOffAt: unknown): void {
+  if (signedOffAt) throw new Error("Backfill run is finalized; it must not be revalidated or signed off again. Original approval remains unchanged.");
+}
+
 class NullFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
   async initialize(): Promise<void> {}
   async assertAssignmentsReady(): Promise<void> {
@@ -164,6 +169,7 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
         || await persistedRowsFingerprint(this.pool, evidence!) !== evidence!.rowsFingerprint) {
         throw new Error("Focus Topic assignment authority validation evidence is inconsistent or stale.");
       }
+      await assertActiveBackfillSet(this.pool, evidence!, false);
     }
     const counts = await this.pool.query<{
       assignment_count: string; scenario_count: string; content_count: string;
@@ -361,7 +367,7 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
     input: Parameters<FocusTopicAuthorityStore["markBackfillValidated"]>[0] | Parameters<FocusTopicAuthorityStore["markBackfillSignedOff"]>[0],
     signOff: boolean, suppliedClient?: Pick<PoolClient, "query">,
   ): Promise<FocusTopicBackfillRunRecord> {
-    await this.initialize();
+    // An APPLY must already exist. Reviewing it must not run schema/data writes.
     const at = input.at ?? new Date();
     const actor = requiredId("signedOffBy" in input ? input.signedOffBy : input.validatedBy, "Operator");
     const client = suppliedClient ?? await this.pool.connect();
@@ -371,6 +377,7 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
       const run = requiredRow((await client.query<BackfillRunRow>(
         "SELECT * FROM focus_topic_backfill_runs WHERE id = $1 FOR UPDATE", [requiredId(input.runId, "Run id")],
       )).rows[0], "Backfill run");
+      assertBackfillRunNotFinalized(run.signed_off_at);
       if (run.result_summary.targetEnvironment !== input.targetEnvironment
         || run.result_summary.databaseIdentity !== await databaseIdentity(client)) throw new Error("Backfill run environment/database mismatch; use the APPLY run from this target.");
       if ((run.result_summary.validation as ValidationEvidence | undefined)?.status === "failed") {
@@ -381,6 +388,7 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
         assertRunMatchesPlan(run, input.plan);
         if (latest?.id !== run.id) throw new Error("Backfill run is not the latest APPLY run.");
         const evidence = planEvidence(input.plan, at, actor);
+        await assertActiveBackfillSet(client, evidence, true);
         if (await persistedRowsFingerprint(client, evidence, true) !== evidence.rowsFingerprint) {
           throw new Error("Backfill rows are incomplete or do not match the current plan.");
         }
@@ -424,6 +432,27 @@ class PostgresFocusTopicAuthorityStore implements FocusTopicAuthorityStore {
 interface ValidationEvidence {
   status: "passed" | "failed"; at: string; by: string; inputFingerprint: string;
   assignmentIds: string[]; scenarioIds: string[]; contentIds: string[]; rowsFingerprint: string;
+}
+async function assertActiveBackfillSet(client: Pick<PoolClient, "query">, evidence: ValidationEvidence, exact: boolean): Promise<void> {
+  const discrepancies: unknown[] = [];
+  // The CLI inventories the entire database. Compare each organization as part of
+  // that global plan, including old backfill rows whose org/Topic left the source.
+  // Reserved backfill provenance excludes genuine manual/direct assignments.
+  for (const [table, actorColumn, inactiveColumn, expectedIds] of [
+    ["focus_topic_assignments", "created_by", "revoked_at", evidence.assignmentIds],
+    ["focus_topic_scenario_attachments", "attached_by", "detached_at", evidence.scenarioIds],
+    ["org_content_topic_attachments", "attached_by", "detached_at", evidence.contentIds],
+  ] as const) {
+    const rows = (await client.query<{ id: string; org_id: string; topic_id: string }>(
+      `SELECT id, org_id, topic_id FROM ${table} WHERE ${actorColumn}=$1 AND ${inactiveColumn} IS NULL ORDER BY org_id, topic_id, id`,
+      [FOCUS_TOPIC_BACKFILL_ACTOR],
+    )).rows;
+    const expected = new Set(expectedIds), actual = new Set(rows.map(row => row.id));
+    const unexpected = rows.filter(row => !expected.has(row.id));
+    const missingIds = exact ? expectedIds.filter(id => !actual.has(id)) : [];
+    if (unexpected.length || missingIds.length) discrepancies.push({ table, unexpectedActiveRows: unexpected, missingActiveIds: missingIds });
+  }
+  if (discrepancies.length) throw new Error(`Active backfill records do not match the plan: ${JSON.stringify(discrepancies)}`);
 }
 async function databaseIdentity(client: Pick<PoolClient, "query">): Promise<string> {
   const row = requiredRow((await client.query("SELECT current_database() AS database, current_schema() AS schema")).rows[0], "Database identity");

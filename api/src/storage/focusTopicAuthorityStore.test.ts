@@ -78,3 +78,24 @@ test("backfill apply is transactional and idempotent while validation and signof
   assert.equal(queries.some((query)=>/ON CONFLICT \(run_version, schema_generation, input_fingerprint\)/.test(query)),true);
   assert.equal(queries.some((query)=>/SET validated_at =/.test(query)),false, "APPLY never automatically validates or signs off");
 });
+
+test("store rejects finalized validation/sign-off under the row lock before schema, inventory or approval writes", async () => {
+  for (const signOff of [false, true]) {
+    const queries: string[] = [];
+    const store = createFocusTopicAuthorityStore({ provider: "postgres", databaseUrl: "postgres://test",
+      pgPoolMax: 1, pgConnectTimeoutMs: 1, pgIdleTimeoutMs: 1, queryPool: {
+        async query() { throw new Error("No pool/schema query is permitted"); },
+        async connect() { return { async query(sql: string) {
+          queries.push(sql);
+          return { rows: sql.includes("FOR UPDATE") ? [{ id: "finalized", signed_off_at: new Date() }] : [] };
+        }, release() {} }; },
+      } as any });
+    const input = { runId: "finalized", plan: {} as any, targetEnvironment: "development" as const };
+    await assert.rejects(signOff ? store.markBackfillSignedOff({ ...input, signedOffBy: "Operator" })
+      : store.markBackfillValidated({ ...input, validatedBy: "Operator" }), /finalized.*must not be revalidated/);
+    assert.equal(queries.length, 3);
+    assert.equal(queries[0], "BEGIN");
+    assert.match(queries[1]!, /SELECT.*FOR UPDATE/);
+    assert.equal(queries[2], "ROLLBACK");
+  }
+});

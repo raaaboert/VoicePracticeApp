@@ -35,7 +35,7 @@ import {
 } from "../src/services/orgDivisions.js";
 import { parseTrainingPackScenarioSelection } from "../src/services/trainingPackScenarioSelection.js";
 import { resolveTrainingContentEligibility } from "../src/services/trainingContentEligibility.js";
-import { createFocusTopicAuthorityStore, FocusTopicBackfillValidationError } from "../src/storage/focusTopicAuthorityStore.js";
+import { assertBackfillRunNotFinalized, createFocusTopicAuthorityStore, FocusTopicBackfillValidationError } from "../src/storage/focusTopicAuthorityStore.js";
 import type { FocusTopicAuthorityStore } from "../src/storage/focusTopicAuthorityStore.js";
 import { createTrainingPackStore } from "../src/storage/trainingPackStore.js";
 
@@ -113,9 +113,15 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl, max: 2, connectionTimeoutMillis: 15_000, idleTimeoutMillis: 10_000, keepAlive: true });
   try {
     if (options.validateRunId || options.signOffRunId) {
+      const recorded = (await pool.query<{ signed_off_at: Date | null }>(
+        "SELECT signed_off_at FROM focus_topic_backfill_runs WHERE id=$1", [options.validateRunId ?? options.signOffRunId],
+      )).rows[0];
+      if (!recorded) throw new Error("Backfill run was not found; an APPLY is required before review.");
+      // Refuse finalized runs before schema initialization, inventory reads or writes.
+      // The store checks again under its row lock to protect concurrent sign-off.
+      assertBackfillRunNotFinalized(recorded.signed_off_at);
       const store = createFocusTopicAuthorityStore({ provider: "postgres", databaseUrl, pgPoolMax: 2,
         pgConnectTimeoutMs: 15_000, pgIdleTimeoutMs: 10_000, queryPool: pool });
-      await store.initialize();
       const client = await pool.connect();
       try {
         await client.query("BEGIN");

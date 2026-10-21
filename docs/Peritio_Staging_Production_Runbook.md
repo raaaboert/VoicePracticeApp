@@ -52,6 +52,10 @@ Execute from the repository root using the approved candidate checkout and its
 installed dependencies. Commands below are operator instructions, not actions
 performed by Batch R1. `DATABASE_URL` must be set **only in the operator process**
 to the separately verified production connection; never copy it into a command log.
+PLAN, APPLY, VALIDATE and SIGN-OFF are controlled cutover-window operations,
+not routine post-cutover maintenance. In particular, post-cutover `--apply` against
+modified legacy source can create a new latest run and block readiness. Do not
+run it casually or use it to work around a finalized-run refusal.
 
 1. Record the approved candidate's full SHA and confirm its ancestry from frozen
    baseline `aa79a9d1fbac6704eb1d0033af81c6342538073d`. Verify actual API/worker Git
@@ -130,11 +134,24 @@ to the separately verified production connection; never copy it into a command l
    ```
 
    Operator identity/times, successful evidence and the empty acknowledgment are durable
-   in the existing backfill record. Repeat successful commands preserve their original
-   attribution/timestamps. Failed validation is recorded, cannot be silently overwritten
-   by another VALIDATE, and cannot be signed off. Repair the cause, review PLAN, explicitly
-   APPLY again, then validate/sign off; prior failures remain recorded. Returning to an
-   older inventory after a newer APPLY also requires fresh validation/sign-off.
+   in the existing backfill record. A **signed-off run is finalized**: subsequent VALIDATE
+   and SIGN-OFF commands are refused before any approval write, even after ordinary source
+   changes. They do not revoke approval or change its operator/timestamps. Repeated successful
+   validation is supported only while the run is unsigned. An identical latest APPLY retains
+   its successful review, but this is not permission to re-APPLY changed data after cutover.
+   Failed unsigned validation remains durable, cannot be silently overwritten by another
+   VALIDATE, and cannot be signed off. Repair the cause, review PLAN, explicitly APPLY again
+   within the controlled window, then validate/sign off; prior failures remain recorded.
+   Returning to an older inventory after a newer APPLY also requires fresh validation/sign-off.
+
+   Validation and sign-off require an exact set of **active backfill-managed** assignments,
+   scenario attachments and content attachments. Unexpected active records from earlier
+   backfills are reported with table/row/organization/Topic identities; manual/direct records
+   with other actor provenance are excluded. `--acknowledge-empty` cannot bypass stale rows.
+   Stop for explicit review and separately authorized correction; the tool does not silently
+   delete, revoke or detach records. A failed cutover must stop before assignments authority
+   is activated. Startup continues to allow legitimate later revocations while refusing
+   unexpected active backfill records for runs with validation evidence.
 9. Only after these gates and explicit cutover approval, select the approved production
    revision and set `FOCUS_TOPIC_AUTHORITY=assignments` in the actual service configuration.
    Verify the mode is saved/active. Deploy/restart deliberately; do not use an uncontrolled
