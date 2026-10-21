@@ -7,7 +7,7 @@ export interface FocusTopicCatalogState {
   error: string | null;
 }
 
-export const FOCUS_TOPIC_HOME_LIMIT = 4;
+export const FOCUS_TOPIC_HOME_LIMIT = 2;
 
 /** One identity-scoped, in-memory catalog shared by Home and the existing catalog screen. */
 export function createFocusTopicCatalogController(
@@ -49,5 +49,7 @@ export function createFocusTopicCatalogController(
 export type FocusTopicCatalogController = ReturnType<typeof createFocusTopicCatalogController>;
 
 export function homeFocusTopicPreview(state: FocusTopicCatalogState): MobileFocusTopicCatalogItem[] {
+  // Preserve authorized company ordering until the API supplies learner-specific
+  // assignment/practice timestamps. Topic createdAt is not learner activity.
   return state.loading || state.error ? [] : (state.topics ?? []).slice(0, FOCUS_TOPIC_HOME_LIMIT);
 }

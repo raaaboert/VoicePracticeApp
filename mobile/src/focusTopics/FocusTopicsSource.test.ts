@@ -110,7 +110,7 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   assert.ok(focusEntry >= 0 && focusEntry < scenarioEntry);
   assert.ok(scenarioEntry < resourcesEntry);
   assert.ok(resourcesEntry < activeRole);
-  assert.ok(focusEntry < home.indexOf("<LinearGradient"));
+  assert.doesNotMatch(home, /styles\.heroCard|Improve with precision\.|<LinearGradient/);
   assert.match(home, /state=\{focusTopicCatalog\.state\}/);
   assert.match(home, /onOpenTopic=\{openHomeFocusTopics\}/);
   assert.match(home, /onViewAll=\{\(\) => openHomeFocusTopics\(\)\}/);

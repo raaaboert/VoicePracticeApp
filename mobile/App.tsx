@@ -396,7 +396,6 @@ const MAX_AUTO_ERROR_MESSAGE_LENGTH = 4_800;
 const IOS_VOICE_SAMPLE_TIMEOUT_MS = 30_000;
 const LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION =
   "Auto-created to preserve existing enterprise training assets during the training-first workspace migration.";
-const APP_ICON_ART = require("./assets/PeritioLogo_061526.png");
 const APP_STARTUP_ART = require("./peritio-source-splash.png");
 const APP_SURFACE_COLORS = {
   sage: "#697364",
@@ -4636,44 +4635,6 @@ export default function App() {
         {canOpenFocusTopics ? <HomeFocusTopicPreview state={focusTopicCatalog.state} theme={setupSurfaceTheme}
           onOpenTopic={openHomeFocusTopics} onViewAll={() => openHomeFocusTopics()}
           onRetry={() => { void focusTopicCatalog.controller.refresh(); }} /> : null}
-        <LinearGradient
-          colors={[APP_SURFACE_COLORS.sage, APP_SURFACE_COLORS.sageDeep]}
-          start={{ x: 0.04, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={[styles.heroCard, useIosCompactHomeLayout ? styles.heroCardCompactHome : null]}
-        >
-          <View style={[styles.heroMarkFrame, useIosCompactHomeLayout ? styles.heroMarkFrameCompactHome : null]}>
-            <Image
-              source={APP_ICON_ART}
-              style={[styles.heroMarkImage, useIosCompactHomeLayout ? styles.heroMarkImageCompactHome : null]}
-              resizeMode="contain"
-            />
-          </View>
-          <Text style={styles.heroKicker} maxFontSizeMultiplier={1.1}>Peritio</Text>
-          <Text
-            style={[styles.heroTitle, useIosCompactHomeLayout ? styles.heroTitleCompactHome : null]}
-            maxFontSizeMultiplier={1.05}
-          >
-            Improve with precision.
-          </Text>
-          <Text
-            style={[styles.heroBody, useIosCompactHomeLayout ? styles.heroBodyCompactHome : null]}
-            maxFontSizeMultiplier={1.1}
-          >
-            Voice simulations and scored feedback for the conversations where tone, judgment, and clarity carry the most weight.
-          </Text>
-          <View style={[styles.heroMetaRow, useIosCompactHomeLayout ? styles.heroMetaRowCompactHome : null]}>
-            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Voice practice</Text>
-            </View>
-            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scenario drills</Text>
-            </View>
-            <View style={[styles.heroMetaChip, useIosCompactHomeLayout ? styles.heroMetaChipCompactHome : null]}>
-              <Text style={styles.heroMetaText} maxFontSizeMultiplier={1.1}>Scored feedback</Text>
-            </View>
-          </View>
-        </LinearGradient>
 
         {trainingContentNotice ? (
           <View style={styles.warningCard}>
@@ -7569,73 +7530,6 @@ function createStyles(theme: ThemeTokens) {
     spacer: { width: 84 },
     topTitle: { color: theme.text, fontSize: 19, fontWeight: "700" },
     card: { borderRadius: 16, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.panel, padding: 15, marginBottom: 14, gap: 9 },
-    heroCard: {
-      borderRadius: 26,
-      borderWidth: 1,
-      borderColor: "rgba(244, 231, 206, 0.18)",
-      paddingHorizontal: 22,
-      paddingVertical: 22,
-      marginBottom: 18,
-      overflow: "hidden",
-      gap: 8,
-      alignItems: "center",
-      shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.14,
-      shadowRadius: 16,
-      shadowOffset: { width: 0, height: 9 },
-      elevation: 4,
-    },
-    heroCardCompactHome: {
-      borderRadius: 22,
-      paddingHorizontal: 16,
-      paddingVertical: 15,
-      marginBottom: 12,
-      gap: 5,
-    },
-    heroMarkFrame: {
-      width: 144,
-      height: 144,
-      borderRadius: 28,
-      borderWidth: 1,
-      borderColor: "rgba(244, 231, 206, 0.22)",
-      backgroundColor: "rgba(255, 255, 255, 0.035)",
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 2,
-      shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.16,
-      shadowRadius: 12,
-      shadowOffset: { width: 0, height: 8 },
-      elevation: 3,
-    },
-    heroMarkFrameCompactHome: {
-      width: 104,
-      height: 104,
-      borderRadius: 22,
-      marginBottom: 0,
-    },
-    heroMarkImage: { width: 128, height: 128, borderRadius: 22 },
-    heroMarkImageCompactHome: { width: 92, height: 92, borderRadius: 18 },
-    heroKicker: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 2.4 },
-    heroTitle: { color: APP_SURFACE_COLORS.cream, fontSize: 28, fontWeight: "800", lineHeight: 32, letterSpacing: -0.7, textAlign: "center" },
-    heroTitleCompactHome: { fontSize: 24, lineHeight: 28 },
-    heroBody: { color: "rgba(248, 238, 217, 0.9)", fontSize: 14.5, lineHeight: 22, textAlign: "center", maxWidth: 296 },
-    heroBodyCompactHome: { fontSize: 13, lineHeight: 19, maxWidth: 286 },
-    heroMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 2 },
-    heroMetaRowCompactHome: { gap: 6, marginTop: 0 },
-    heroMetaChip: {
-      borderRadius: 999,
-      borderWidth: 1,
-      borderColor: "rgba(244, 231, 206, 0.2)",
-      backgroundColor: "rgba(28, 33, 28, 0.18)",
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-    },
-    heroMetaChipCompactHome: {
-      paddingHorizontal: 8,
-      paddingVertical: 4,
-    },
-    heroMetaText: { color: "rgba(248, 238, 217, 0.9)", fontSize: 12, fontWeight: "700", letterSpacing: 0.2 },
     trainingModuleTile: {
       minHeight: 92,
       borderRadius: 8,

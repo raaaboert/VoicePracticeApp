@@ -11,11 +11,24 @@ function deferred<T>() {
 const topics = Array.from({ length: 6 }, (_, i) => ({ id: `topic_${i}`, name: `Topic ${i}`,
   description: "Authorized description", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: i, resourceCount: 6 - i }));
 
-test("Home previews only four server-ordered Topics while the shared catalog retains every Topic", async () => {
+test("Home previews only two company-ordered Topics while the shared catalog retains every Topic", async () => {
   const catalog = createFocusTopicCatalogController(async () => ({ topics }));
   await catalog.refresh();
-  assert.deepEqual(homeFocusTopicPreview(catalog.getSnapshot()), topics.slice(0, 4));
+  assert.deepEqual(homeFocusTopicPreview(catalog.getSnapshot()), topics.slice(0, 2));
   assert.deepEqual(catalog.getSnapshot().topics, topics);
+});
+
+test("missing learner activity uses deterministic company order, never global Topic creation as practice/assignment recency", () => {
+  const ordered = [
+    { ...topics[3]!, createdAt: "2020-01-01T00:00:00.000Z" },
+    { ...topics[1]!, createdAt: "2024-01-01T00:00:00.000Z" },
+    { ...topics[0]!, createdAt: "2026-10-20T00:00:00.000Z" },
+  ];
+  const state = { topics: ordered, loading: false, error: null };
+  assert.deepEqual(homeFocusTopicPreview(state), ordered.slice(0, 2));
+  assert.deepEqual(homeFocusTopicPreview(state), homeFocusTopicPreview(state));
+  assert.deepEqual(state.topics, ordered, "Home must not reorder the full catalog");
+  assert.deepEqual(homeFocusTopicPreview({ ...state, topics: [ordered[2]!] }), [ordered[2]]);
 });
 
 test("loading, empty, error and retry remain distinct and never retain stale Topics", async () => {
@@ -31,7 +44,7 @@ test("loading, empty, error and retry remain distinct and never retain stale Top
   assert.match(catalog.getSnapshot().error!, /could not be loaded/);
   assert.doesNotMatch(catalog.getSnapshot().error!, /private error/);
   fail = false; await catalog.refresh();
-  assert.deepEqual(homeFocusTopicPreview(catalog.getSnapshot()), topics.slice(0, 4));
+  assert.deepEqual(homeFocusTopicPreview(catalog.getSnapshot()), topics.slice(0, 2));
   const empty = createFocusTopicCatalogController(async () => ({ topics: [] }));
   await empty.refresh();
   assert.deepEqual(empty.getSnapshot(), { topics: [], loading: false, error: null });

@@ -4,6 +4,7 @@ import test from "node:test";
 import ts from "typescript";
 import { homeFocusTopicPreview, createFocusTopicCatalogController } from "./catalog";
 import { buildScenarioSetupSelection, simulationTopicReturnOrigin } from "../trainingContent/scenarioSetupNavigation";
+import { getTrainingContentTheme } from "../trainingContent/theme";
 
 const app = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
 
@@ -51,31 +52,62 @@ function elements(tree: any): Element[] {
   return [tree, ...elements(tree.props.children)];
 }
 const previewSource = readFileSync(new URL("./HomeFocusTopicPreview.tsx", import.meta.url), "utf8");
+const previewStyles = execute(previewSource, "styles", { StyleSheet: { create: (styles: unknown) => styles } });
 const renderPreview = execute(previewSource, "HomeFocusTopicPreview", {
   React: react, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
-  FocusTopicCard: "FocusTopicCard", homeFocusTopicPreview, styles: {},
+  MaterialCommunityIcons: "Icon", homeFocusTopicPreview, styles: previewStyles,
 });
 const topics = Array.from({ length: 5 }, (_, i) => ({ id: `topic_${i}`, name: `Topic ${i}`, description: "Details",
   createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: i, resourceCount: 5 - i }));
 
-test("Home renders four existing Topic cards, card selection and View All use the actual callbacks", () => {
+test("Home renders at most two compact Topic rows with counts, selection and View All callbacks", () => {
   const events: string[] = [];
   const tree = elements(renderPreview({ state: { topics, loading: false, error: null }, theme: {},
     onOpenTopic: (id: string) => events.push(id), onViewAll: () => events.push("all") }));
-  const cards = tree.filter((node) => node.type === "FocusTopicCard");
-  assert.equal(cards.length, 4);
-  assert.deepEqual(cards.map((node) => node.props.topic), topics.slice(0, 4));
-  cards[2]!.props.onOpen();
+  const rows = tree.filter((node) => node.props.accessibilityLabel?.startsWith("Open Focus Topic "));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((node) => node.props.accessibilityLabel), [
+    "Open Focus Topic Topic 0. 0 scenarios, 5 resources available",
+    "Open Focus Topic Topic 1. 1 scenario, 4 resources available",
+  ]);
+  assert.ok(tree.some((node) => node.type === "Text" && node.props.children[0] === "0 scenarios · 5 resources"));
+  assert.ok(tree.some((node) => node.type === "Text" && node.props.children[0] === "1 scenario · 4 resources"));
+  assert.doesNotMatch(JSON.stringify(tree), /Details|FocusTopicCard/);
+  assert.ok(tree.some((node) => node.type === "Icon" && node.props.name === "target"));
+  assert.ok(tree.some((node) => node.type === "Icon" && node.props.name === "chevron-right"));
+  rows[1]!.props.onPress();
   tree.find((node) => node.props.accessibilityLabel === "View all Focus Topics")!.props.onPress();
-  assert.deepEqual(events, ["topic_2", "all"]);
+  assert.deepEqual(events, ["topic_1", "all"]);
 });
 
-test("Home renders distinct loading, failure/Retry and empty states without stale cards", () => {
+test("compact Home rows retain readable theme tokens, accessible counts and width-safe touch targets", () => {
+  for (const scheme of ["classic_blue", "soft_light"] as const) {
+    const theme = getTrainingContentTheme(scheme);
+    const tree = elements(renderPreview({ state: { topics: [{ ...topics[0], scenarioCount: 0, resourceCount: 0 }],
+      loading: false, error: null }, theme }));
+    const row = tree.find((node) => node.props.accessibilityLabel?.startsWith("Open Focus Topic "))!;
+    assert.equal(row.props.accessibilityRole, "button");
+    assert.equal(row.props.accessibilityLabel, "Open Focus Topic Topic 0. 0 scenarios, 0 resources available");
+    assert.equal(row.props.accessibilityHint, "Opens this Focus Topic");
+    assert.equal(row.props.style({ pressed: false })[1].backgroundColor, theme.surface);
+    assert.equal(row.props.style({ pressed: true })[1].backgroundColor, theme.surfaceStrong);
+    assert.equal(row.props.style({ pressed: false })[1].borderColor, theme.border);
+    assert.ok(row.props.style({ pressed: false })[0].minHeight >= 44);
+    const name = tree.find((node) => node.props.numberOfLines === 2)!;
+    assert.equal(name.props.style[1].color, theme.text);
+    assert.equal(previewStyles.copy.minWidth, 0);
+    assert.equal(previewStyles.copy.flex, 1);
+    assert.ok(tree.filter((node) => node.type === "Icon").every((node) => node.props.accessible === false));
+    assert.ok(tree.some((node) => node.type === "Text" && node.props.style?.[1]?.color === theme.muted));
+  }
+});
+
+test("Home renders distinct loading, failure/Retry and empty states without stale rows", () => {
   let retries = 0;
   for (const state of [{ topics, loading: true, error: null },
     { topics: null, loading: false, error: "Unable to load" }, { topics: [], loading: false, error: null }]) {
     const tree = elements(renderPreview({ state, theme: {}, onRetry: () => retries++ }));
-    assert.equal(tree.filter((node) => node.type === "FocusTopicCard").length, 0);
+    assert.equal(tree.filter((node) => node.props.accessibilityLabel?.startsWith("Open Focus Topic ")).length, 0);
     if (state.loading) assert.ok(tree.some((node) => node.props.accessibilityRole === "progressbar"));
     else if (state.error) tree.find((node) => node.props.accessibilityLabel === "Retry Focus Topics")!.props.onPress();
     else assert.match(JSON.stringify(tree), /No Focus Topics are currently assigned/);
