@@ -49,7 +49,17 @@ export function createFocusTopicCatalogController(
 export type FocusTopicCatalogController = ReturnType<typeof createFocusTopicCatalogController>;
 
 export function homeFocusTopicPreview(state: FocusTopicCatalogState): MobileFocusTopicCatalogItem[] {
-  // Preserve authorized company ordering until the API supplies learner-specific
-  // assignment/practice timestamps. Topic createdAt is not learner activity.
-  return state.loading || state.error ? [] : (state.topics ?? []).slice(0, FOCUS_TOPIC_HOME_LIMIT);
+  if (state.loading || state.error) return [];
+  const latest = (topic: MobileFocusTopicCatalogItem) => Math.max(
+    ...[topic.latestAssignmentAt, topic.lastCompletedPracticeAt].map(value => {
+      const parsed = value ? Date.parse(value) : NaN;
+      return Number.isFinite(parsed) ? parsed : -Infinity;
+    }),
+  );
+  // Stable sort retains the authorized company order on ties/missing history.
+  // The shared catalog is never reordered; Topic creation is not learner activity.
+  return [...(state.topics ?? [])].sort((a, b) => {
+    const left = latest(a), right = latest(b);
+    return left === right ? 0 : left > right ? -1 : 1;
+  }).slice(0, FOCUS_TOPIC_HOME_LIMIT);
 }

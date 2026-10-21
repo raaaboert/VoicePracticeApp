@@ -86,6 +86,7 @@ interface SimulationSessionRow {
   scenario_version_id: string | null;
   industry_snapshot: unknown;
   training_id: string | null;
+  origin_topic_id?: string | null;
   training_pack_id: string | null;
   client_started_at: string | Date | null;
   server_started_at: string | Date;
@@ -165,6 +166,7 @@ function normalizeSimulationSessionRecord(candidate: unknown): SimulationSession
       if (raw === undefined || raw === null) return null;
       return parseSimulationSessionIndustrySnapshot(raw) ?? undefined;
     })(),
+    originTopicId: normalizeNullableString((candidate as SimulationSessionRecord).originTopicId) ?? undefined,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
     trainingPackId: normalizeNullableString((candidate as { trainingPackId?: unknown }).trainingPackId) ?? undefined,
     clientStartedAt: normalizeIsoString((candidate as { clientStartedAt?: unknown }).clientStartedAt) ?? undefined,
@@ -191,6 +193,7 @@ function mapSimulationSessionRow(row: SimulationSessionRow): SimulationSessionRe
     scenarioVersionId: row.scenario_version_id,
     industrySnapshot: row.industry_snapshot,
     trainingId: row.training_id,
+    originTopicId: row.origin_topic_id,
     trainingPackId: row.training_pack_id,
     clientStartedAt: row.client_started_at,
     serverStartedAt: row.server_started_at,
@@ -232,7 +235,8 @@ function assertSessionIdentityCompatibility(existing: SimulationSessionRecord, i
     existing.segmentId !== incoming.segmentId ||
     existing.scenarioId !== incoming.scenarioId ||
     (existing.scenarioVersionId ?? null) !== (incoming.scenarioVersionId ?? null) ||
-    existingTrainingId !== incomingTrainingId
+    existingTrainingId !== incomingTrainingId ||
+    (incoming.originTopicId != null && (existing.originTopicId ?? null) !== incoming.originTopicId)
   ) {
     throw new SimulationSessionConflictError("Simulation session identity does not match the previously recognized session.");
   }
@@ -675,7 +679,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           scenario_id,
           scenario_version_id,
           industry_snapshot,
-          training_id,
+          training_id, origin_topic_id,
           training_pack_id,
           client_started_at,
           server_started_at,
@@ -704,7 +708,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           scenario_id,
           scenario_version_id,
           industry_snapshot,
-          training_id,
+          training_id, origin_topic_id,
           training_pack_id,
           client_started_at,
           server_started_at,
@@ -730,7 +734,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
     await this.ensureTable();
     const existing = await this.getById(normalized.simulationSessionId);
     const nextRecord = existing ? mergeStartedSession(existing, normalized) : normalized;
-    await this.pool.query(
+    const written = await this.pool.query(
       `
         INSERT INTO simulation_sessions (
           simulation_session_id,
@@ -748,11 +752,11 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
           last_seen_at,
           status,
           usage_recorded_at,
-          usage_session_record_id
+          usage_session_record_id, origin_topic_id
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9,
-          $10, $11::timestamptz, $12::timestamptz, $13::timestamptz, $14, $15::timestamptz, $16
+          $10, $11::timestamptz, $12::timestamptz, $13::timestamptz, $14, $15::timestamptz, $16, $17
         )
         ON CONFLICT (simulation_session_id) DO UPDATE
           SET user_id = EXCLUDED.user_id,
@@ -770,6 +774,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
               status = simulation_sessions.status,
               usage_recorded_at = simulation_sessions.usage_recorded_at,
               usage_session_record_id = simulation_sessions.usage_session_record_id
+        WHERE EXCLUDED.origin_topic_id IS NULL OR simulation_sessions.origin_topic_id IS NOT DISTINCT FROM EXCLUDED.origin_topic_id
       `,
       [
         nextRecord.simulationSessionId,
@@ -787,9 +792,11 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
         nextRecord.lastSeenAt,
         nextRecord.status,
         nextRecord.usageRecordedAt ?? null,
-        nextRecord.usageSessionRecordId ?? null
+        nextRecord.usageSessionRecordId ?? null,
+        nextRecord.originTopicId ?? null
       ]
     );
+    if (!written.rowCount) throw new SimulationSessionConflictError("Simulation session Topic origin does not match.");
     return (await this.getById(nextRecord.simulationSessionId)) ?? nextRecord;
   }
 
@@ -849,10 +856,10 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
       if (!r) { await client.query("COMMIT"); return null; }
       const inserted = await client.query(`INSERT INTO usage_sessions
         (id,user_id,org_id,division_id,segment_id,scenario_id,scenario_version_id,training_id,training_pack_id,
-         started_at,ended_at,raw_duration_seconds,billed_seconds_added,created_at,usage_source)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO NOTHING RETURNING *`,
+         started_at,ended_at,raw_duration_seconds,billed_seconds_added,created_at,usage_source,origin_topic_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (id) DO NOTHING RETURNING *`,
         [r.id,r.userId,r.orgId,r.divisionId ?? null,r.segmentId,r.scenarioId,r.scenarioVersionId ?? null,
-         r.trainingId ?? null,r.trainingPackId ?? null,r.startedAt,r.endedAt,r.rawDurationSeconds,r.billedSecondsAdded ?? null,r.createdAt,p.source]);
+         r.trainingId ?? null,r.trainingPackId ?? null,r.startedAt,r.endedAt,r.rawDurationSeconds,r.billedSecondsAdded ?? null,r.createdAt,p.source,r.originTopicId ?? null]);
       const existing = inserted.rows[0] ?? (await client.query("SELECT * FROM usage_sessions WHERE id=$1", [r.id])).rows[0];
       const record = mapUsageSessionRow(existing)!;
       if (record.userId !== session.userId || record.orgId !== session.orgId) throw new SimulationSessionConflictError("Usage ownership mismatch.");
@@ -1025,6 +1032,7 @@ class PostgresSimulationSessionStore extends BaseSimulationSessionStore {
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_org_id ON simulation_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_id ON simulation_sessions (scenario_id);
             ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
+            ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS origin_topic_id TEXT NULL;
             ALTER TABLE simulation_sessions ADD COLUMN IF NOT EXISTS industry_snapshot JSONB NULL;
             CREATE INDEX IF NOT EXISTS idx_simulation_sessions_scenario_version_id
               ON simulation_sessions (scenario_version_id) WHERE scenario_version_id IS NOT NULL;

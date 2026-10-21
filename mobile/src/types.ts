@@ -87,6 +87,7 @@ export type SimulationEvaluationResult =
   | NotScoredSimulationEvaluationResult;
 
 export interface SimulationConfig {
+  originTopicId?: string | null;
   simulationSessionId: string;
   scenario: Scenario;
   industryId: string;

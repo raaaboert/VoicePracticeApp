@@ -191,3 +191,23 @@ test("file usage session store refreshSnapshot picks up out-of-band writes and d
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+
+test("file-store recency preserves explicit origins across restart and excludes abandoned/unknown/foreign usage", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "vp-recency-"));
+  const options = { provider: "file" as const, dbPath: path.join(directory, "db.json"), databaseUrl: null,
+    pgPoolMax: 1, pgConnectTimeoutMs: 100, pgIdleTimeoutMs: 100 };
+  try {
+    const store = createUsageSessionStore(options); await store.initialize();
+    await store.appendRecord({ ...createSession(), originTopicId: "topic", usageSource: "client_completed" });
+    await store.appendRecord({ ...createSession({ id: "abandoned", endedAt: "2099-01-01T00:00:00.000Z" }), originTopicId: "topic", usageSource: "server_abandoned" });
+    await store.appendRecord({ ...createSession({ id: "historical", trainingId: "topic", endedAt: "2099-01-01T00:00:00.000Z" }) });
+    const restarted = createUsageSessionStore(options); await restarted.initialize();
+    await restarted.importLegacyRecords([{ ...createSession(), originTopicId: "forged_replacement" }]);
+    assert.equal(restarted.getRecordById("sess_1")!.originTopicId, "topic", "duplicate legacy import never changes validated origin");
+    assert.deepEqual(await restarted.latestCompletedTopicPractice("user_1", "org_1", ["topic"]), { topic: "2026-03-31T10:05:00.000Z" });
+    assert.deepEqual(await restarted.latestCompletedTopicPractice("other", "org_1", ["topic"]), {});
+    assert.deepEqual(await restarted.latestCompletedTopicPractice("user_1", "other", ["topic"]), {});
+    assert.deepEqual(await restarted.latestCompletedTopicPractice("user_1", "org_1", []), {});
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

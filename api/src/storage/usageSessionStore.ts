@@ -25,6 +25,7 @@ export interface UsageSessionAppendResult {
 }
 
 export interface UsageSessionStore {
+  latestCompletedTopicPractice(userId: string, orgId: string, topicIds: readonly string[]): Promise<Record<string, string>>;
   initialize(): Promise<void>;
   refreshSnapshot(): Promise<void>;
   importLegacyRecords(records: UsageSessionRecord[]): Promise<{ importedCount: number }>;
@@ -57,6 +58,7 @@ interface UsageSessionRow {
   scenario_id: string;
   scenario_version_id: string | null;
   training_id: string | null;
+  origin_topic_id?: string | null;
   training_pack_id: string | null;
   started_at: string | Date;
   ended_at: string | Date;
@@ -144,6 +146,7 @@ function normalizeUsageSessionRecord(candidate: unknown): UsageSessionRecord | n
     segmentId,
     scenarioId,
     scenarioVersionId: normalizeNullableString((candidate as { scenarioVersionId?: unknown }).scenarioVersionId) ?? undefined,
+    originTopicId: normalizeNullableString((candidate as UsageSessionRecord).originTopicId) ?? undefined,
     trainingId: normalizeNullableString((candidate as { trainingId?: unknown }).trainingId) ?? undefined,
     trainingPackId: normalizeNullableString((candidate as { trainingPackId?: unknown }).trainingPackId) ?? undefined,
     startedAt,
@@ -239,7 +242,7 @@ function normalizeUsageSessionCollection(records: UsageSessionRecord[]): UsageSe
     const existingCreatedAtMs = new Date(existing.createdAt).getTime();
     const nextCreatedAtMs = new Date(record.createdAt).getTime();
     if (Number.isNaN(existingCreatedAtMs) || (!Number.isNaN(nextCreatedAtMs) && nextCreatedAtMs >= existingCreatedAtMs)) {
-      deduped.set(record.id, record);
+      deduped.set(record.id, { ...record, originTopicId: existing.originTopicId });
     }
   }
 
@@ -276,6 +279,7 @@ export function mapUsageSessionRow(row: UsageSessionRow): UsageSessionRecord | n
     scenarioId: row.scenario_id,
     scenarioVersionId: row.scenario_version_id,
     trainingId: row.training_id,
+    originTopicId: row.origin_topic_id,
     trainingPackId: row.training_pack_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
@@ -301,6 +305,17 @@ abstract class BaseUsageSessionStore implements UsageSessionStore {
 
   listRecords(query: UsageSessionQuery = {}): UsageSessionRecord[] {
     return this.records.filter((record) => matchesUsageSessionQuery(record, query));
+  }
+
+  async latestCompletedTopicPractice(userId: string, orgId: string, topicIds: readonly string[]): Promise<Record<string, string>> {
+    const allowed = new Set(topicIds);
+    const result: Record<string, string> = {};
+    for (const row of this.listRecords({ userId, orgId })) {
+      const id = row.originTopicId;
+      if (!id || !allowed.has(id) || row.usageSource === "server_abandoned") continue;
+      if (!result[id] || Date.parse(row.endedAt) > Date.parse(result[id])) result[id] = row.endedAt;
+    }
+    return result;
   }
 
   /**
@@ -487,6 +502,18 @@ class FileUsageSessionStore extends BaseUsageSessionStore {
 }
 
 class PostgresUsageSessionStore extends BaseUsageSessionStore {
+  override async latestCompletedTopicPractice(userId: string, orgId: string, topicIds: readonly string[]): Promise<Record<string, string>> {
+    if (!topicIds.length) return {};
+    await this.ensureTable();
+    // A live, indexed per-learner read; never refresh the global reporting snapshot.
+    const result = await this.pool.query<{ origin_topic_id: string; ended_at: Date }>(`
+      SELECT DISTINCT ON (origin_topic_id) origin_topic_id, ended_at
+      FROM usage_sessions
+      WHERE user_id = $1 AND org_id = $2 AND origin_topic_id = ANY($3::text[])
+        AND usage_source IS DISTINCT FROM 'server_abandoned'
+      ORDER BY origin_topic_id, ended_at DESC`, [userId, orgId, topicIds]);
+    return Object.fromEntries(result.rows.map(row => [row.origin_topic_id, new Date(row.ended_at).toISOString()]));
+  }
   private readonly pool: Pool;
   private ensureTablePromise: Promise<void> | null = null;
   private initialized = false;
@@ -591,11 +618,11 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             ended_at,
             raw_duration_seconds,
             billed_seconds_added,
-            created_at, usage_source
+            created_at, usage_source, origin_topic_id
           )
           VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15
+            $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15, $16
           )
           ON CONFLICT (id) DO NOTHING
           RETURNING
@@ -612,7 +639,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             ended_at,
             raw_duration_seconds,
             billed_seconds_added,
-            created_at, usage_source
+            created_at, usage_source, origin_topic_id
         `,
         [
           normalized.id,
@@ -628,7 +655,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           normalized.endedAt,
           normalized.rawDurationSeconds,
           normalized.billedSecondsAdded ?? null,
-          normalized.createdAt, normalized.usageSource ?? null
+          normalized.createdAt, normalized.usageSource ?? null, normalized.originTopicId ?? null
         ]
       );
 
@@ -731,6 +758,10 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS usage_source TEXT NULL;
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS division_id TEXT NULL;
             ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS scenario_version_id TEXT NULL;
+            ALTER TABLE usage_sessions ADD COLUMN IF NOT EXISTS origin_topic_id TEXT NULL;
+            CREATE INDEX IF NOT EXISTS idx_usage_sessions_topic_recency
+              ON usage_sessions (user_id, org_id, origin_topic_id, ended_at DESC)
+              WHERE origin_topic_id IS NOT NULL AND usage_source IS DISTINCT FROM 'server_abandoned';
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_user_id ON usage_sessions (user_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_org_id ON usage_sessions (org_id);
             CREATE INDEX IF NOT EXISTS idx_usage_sessions_training_pack_id ON usage_sessions (training_pack_id);
@@ -766,7 +797,7 @@ class PostgresUsageSessionStore extends BaseUsageSessionStore {
           ended_at,
           raw_duration_seconds,
           billed_seconds_added,
-          created_at, usage_source
+          created_at, usage_source, origin_topic_id
         FROM usage_sessions
         ORDER BY created_at ASC, ended_at ASC, id ASC
       `
@@ -813,11 +844,11 @@ async function upsertUsageSessionRow(
         ended_at,
         raw_duration_seconds,
         billed_seconds_added,
-        created_at, usage_source
+        created_at, usage_source, origin_topic_id
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15
+        $10::timestamptz, $11::timestamptz, $12, $13, $14::timestamptz, $15, $16
       )
       ON CONFLICT (id) DO UPDATE
         SET user_id = EXCLUDED.user_id,
@@ -832,7 +863,8 @@ async function upsertUsageSessionRow(
             ended_at = EXCLUDED.ended_at,
             raw_duration_seconds = EXCLUDED.raw_duration_seconds,
             billed_seconds_added = EXCLUDED.billed_seconds_added,
-            created_at = EXCLUDED.created_at, usage_source = EXCLUDED.usage_source
+            created_at = EXCLUDED.created_at, usage_source = EXCLUDED.usage_source,
+            origin_topic_id = usage_sessions.origin_topic_id
     `,
     [
       record.id,
@@ -848,7 +880,7 @@ async function upsertUsageSessionRow(
       record.endedAt,
       record.rawDurationSeconds,
       record.billedSecondsAdded ?? null,
-      record.createdAt, record.usageSource ?? null
+      record.createdAt, record.usageSource ?? null, record.originTopicId ?? null
     ]
   );
 }

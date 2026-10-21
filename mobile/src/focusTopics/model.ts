@@ -70,6 +70,8 @@ export function parseFocusTopicCatalogResponse(
       createdAt: topic.createdAt,
       scenarioCount: topic.scenarioCount,
       resourceCount: topic.resourceCount,
+      ...(isNormalizedTimestamp(topic.latestAssignmentAt) ? { latestAssignmentAt: topic.latestAssignmentAt } : {}),
+      ...(isNormalizedTimestamp(topic.lastCompletedPracticeAt) ? { lastCompletedPracticeAt: topic.lastCompletedPracticeAt } : {}),
     } satisfies MobileFocusTopicCatalogItem;
   });
 

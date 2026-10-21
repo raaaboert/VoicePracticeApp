@@ -3511,6 +3511,7 @@ export function SimulationScreen({
               segmentId: config.scenario.segmentId,
               scenarioId: config.scenario.id,
               trainingId: config.trainingId ?? null,
+              originTopicId: config.originTopicId ?? null,
               trainingPackId: sessionTrainingPackIdRef.current,
               clientStartedAt: new Date().toISOString(),
             },

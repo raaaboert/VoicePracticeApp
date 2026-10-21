@@ -2147,9 +2147,11 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       [[pinnedScenarioId, "custom", topic.id]]);
       const pinnedStarted = await call(startPath, {
         simulationSessionId: pinnedSessionId, segmentId: segment.id, scenarioId: pinnedScenarioId,
+        originTopicId: topic.id,
         trainingId: topic.id, clientStartedAt: now,
       });
       assert.equal(pinnedStarted.status, 201, JSON.stringify(pinnedStarted.body));
+      assert.equal((await pool.query("SELECT origin_topic_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId])).rows[0].origin_topic_id, topic.id);
       assert.equal((await pool.query<{ scenario_version_id: string | null }>(
         "SELECT scenario_version_id FROM simulation_sessions WHERE simulation_session_id=$1", [pinnedSessionId],
       )).rows[0]?.scenario_version_id, pinnedV1Id);

@@ -134,6 +134,30 @@ test("Topic-origin navigation is captured only for the selected practice, never 
   }), origin);
 });
 
+test("actual simulation setup captures standard/custom Topic origins without changing runtime trainingId; Browse stays unknown", async () => {
+  let delivered: any;
+  const register = execute(readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8"), "startSimulationSession", {
+    requestJson: async (_path: string, init: { body: string }) => { delivered = JSON.parse(init.body); },
+  });
+  for (const source of ["standard", "custom"] as const) {
+    const chosen = { ...scenario, source, trainingId: source === "custom" ? "topic" : null };
+    const context = { simulationTopicReturnOrigin, setupOrigin: { type: "focus_topic", topicId: "topic" },
+      originScenarioSelection: buildScenarioSetupSelection(chosen), scenarioCatalogTab: source,
+      activeTraining: { id: "topic" }, industryId: "sales", activeSegment: { id: "sales_representative" }, scenario: chosen };
+    const captured = execute(app, "topicOrigin", context);
+    assert.deepEqual(captured, { type: "focus_topic", topicId: "topic" });
+    await register("learner", { simulationSessionId: "session", scenarioId: chosen.id, segmentId: chosen.segmentId,
+      trainingId: chosen.trainingId, originTopicId: captured.topicId }, "token");
+    assert.equal(delivered.originTopicId, "topic");
+    assert.equal(delivered.trainingId, chosen.trainingId);
+    assert.equal(execute(app, "topicOrigin", { ...context, setupOrigin: null }), null);
+    assert.equal(execute(app, "topicOrigin", { ...context, scenario: { ...chosen, id: "other" } }), null);
+  }
+  assert.match(app, /originTopicId: setupOriginTopicId\(topicOrigin\)/);
+  const simulation = readFileSync(new URL("../screens/SimulationScreen.tsx", import.meta.url), "utf8");
+  assert.match(simulation, /originTopicId: config\.originTopicId \?\? null/);
+});
+
 test("actual Home navigation opens a Topic directly or the full catalog and clears old origins", () => {
   const events: Record<string, any> = {};
   const open = execute(app, "openHomeFocusTopics", Object.fromEntries([
@@ -243,9 +267,10 @@ test("actual catalog hook reuses Home/View All data, refreshes on reentry and is
   const pendingEffects: Array<() => void> = [];
   let onAppState: (state: string) => void = () => {};
   let calls = 0;
+  let latestPractice: string | undefined;
   const hook = execute(source, "useFocusTopicCatalog", {
     createFocusTopicCatalogController,
-    fetchFocusTopicCatalog: async (id: string) => { calls++; return { topics: [{ ...topics[0], id }] }; },
+    fetchFocusTopicCatalog: async (id: string) => { calls++; return { topics: [{ ...topics[0], id, lastCompletedPracticeAt: latestPractice }] }; },
     useMemo: (factory: () => any, deps: unknown[]) => {
       if (!memo || deps.some((dep, index) => dep !== memo!.deps[index])) memo = { deps, value: factory() };
       return memo.value;
@@ -284,9 +309,11 @@ test("actual catalog hook reuses Home/View All data, refreshes on reentry and is
   assert.equal(calls, 1, "Home → View All → Home does not prepare another request");
   render({ ...context, destination: null });
   assert.equal(first.controller.getSnapshot().topics, null);
+  latestPractice = "2026-10-20T12:00:00.000Z";
   render({ ...context, destination: "focus_topics" });
   await settle();
   assert.equal(calls, 2, "leaving and reentering refreshes");
+  assert.equal(first.controller.getSnapshot().topics[0].lastCompletedPracticeAt, latestPractice, "return after practice reads current recency before Home reuses it");
   onAppState("inactive"); assert.equal(first.controller.getSnapshot().topics, null);
   onAppState("active"); await settle(); assert.equal(calls, 3);
   const changedOrg = render({ ...context, orgId: "org_b" });

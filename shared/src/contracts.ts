@@ -227,6 +227,9 @@ export interface MobileFocusTopicCatalogItem {
   createdAt: string;
   scenarioCount: number;
   resourceCount: number;
+  /** Applicable assignment-rule creation, not inferred membership start. */
+  latestAssignmentAt?: string | null;
+  lastCompletedPracticeAt?: string | null;
 }
 
 export interface MobileFocusTopicCatalogResponse {
@@ -1179,6 +1182,8 @@ export interface UsageSessionRecord {
   scenarioId: string;
   scenarioVersionId?: string | null;
   trainingId?: string | null;
+  /** Validated launch origin; independent of runtime training selection. */
+  originTopicId?: string | null;
   trainingPackId?: string | null;
   startedAt: string;
   endedAt: string;
@@ -1226,6 +1231,8 @@ export interface SimulationSessionRecord {
   scenarioVersionId?: string | null;
   industrySnapshot?: SimulationSessionIndustrySnapshot | null;
   trainingId?: string | null;
+  /** Validated launch origin; independent of runtime training selection. */
+  originTopicId?: string | null;
   trainingPackId?: string | null;
   clientStartedAt?: string | null;
   serverStartedAt: string;
@@ -2979,6 +2986,8 @@ export interface StartSimulationSessionRequest {
   segmentId: string;
   scenarioId: string;
   trainingId?: string | null;
+  /** Validated launch origin; independent of runtime training selection. */
+  originTopicId?: string | null;
   trainingPackId?: string | null;
   clientStartedAt?: string | null;
 }

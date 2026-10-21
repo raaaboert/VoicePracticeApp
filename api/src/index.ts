@@ -858,6 +858,7 @@ const defaultTrainingContentMobileService = createTrainingContentMobileService({
 let trainingContentMobileService: TrainingContentMobileService =
   defaultTrainingContentMobileService;
 const defaultMobileFocusTopicCatalogService = createMobileFocusTopicCatalogService({
+  latestCompletedTopicPractice: (userId, orgId, topicIds) => usageSessionStore.latestCompletedTopicPractice(userId, orgId, topicIds),
   trainingPackStore,
   trainingContentStore,
   entitlementStore: orgModuleEntitlementStore,
@@ -27321,6 +27322,11 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
 
   const userId = request.params.userId;
   const body = request.body as StartSimulationSessionRequest & { sessionId?: unknown };
+  if (body.originTopicId != null && (typeof body.originTopicId !== "string" || !body.originTopicId.trim())) {
+    response.status(400).json({ error: "originTopicId must be a nonempty Focus Topic ID." });
+    return;
+  }
+  const originTopicId = body.originTopicId?.trim() || null;
   const bodyRecord = body as unknown as Record<string, unknown>;
   const simulationSessionId = resolveRecognizedSimulationSessionId(request, bodyRecord);
   const trainingId = typeof body.trainingId === "string" && body.trainingId.trim() ? body.trainingId.trim() : null;
@@ -27415,6 +27421,28 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
     }
     const canonicalTrainingId = assignmentLaunch?.trainingId ?? resolvedScenario.canonicalTrainingId;
 
+    if (originTopicId && !prior) {
+      const userDivisionId = org?.divisionsEnabled === true ? resolveUserActiveDivisionId(db, org.id, user) : null;
+      const detail = org ? await mobileFocusTopicCatalogService.getDetail({
+        authorityMode: runtimeConfig.focusTopicAuthority,
+        authoritySnapshot: runtimeConfig.focusTopicAuthority === "assignments" ? await focusTopicAuthorityStore.listSnapshot(org.id) : undefined,
+        actingOrgId: org.id, organizationActive: org.status === "active", user, users: db.users,
+        topics: db.orgTrainings, packAttachments: db.orgTrainingPackAttachments,
+        scenarioAttachments: db.orgTrainingScenarioAttachments, packAssignments: db.trainingPackAssignments ?? [],
+        scenarioConfig: topicConfig,
+        isTopicVisible: topic => topic.orgId === org.id && isDivisionVisibleToUser({
+          divisionsEnabled: org.divisionsEnabled === true, userDivisionId,
+          contentDivisionId: org.divisionsEnabled === true ? resolveTrainingActiveDivisionId(db, org.id, topic.id) : null,
+        }),
+        resolveScenario: (id, training, options) => resolveMobileFocusTopicScenarioSummary(topicConfig, id, training, options),
+      }, originTopicId) : null;
+      if (!detail?.scenarios.some(row => row.id === body.scenarioId && row.segmentId === body.segmentId)
+        || (resolvedScenario.source === "custom" && canonicalTrainingId !== originTopicId)) {
+        response.status(403).json({ error: "Focus Topic origin is not available for this scenario.", code: "invalid_topic_origin" });
+        return;
+      }
+    }
+
     // Existing-session retries never acquire new admission or include estimates.
     if (!prior) await reconcileAbandonedSimulationUsage(db, user.id);
     const accountingUsage = !prior ? await newSessionUsageAccess({ store: simulationSessionStore,
@@ -27463,6 +27491,7 @@ app.post("/mobile/users/:userId/simulation-sessions/start", async (request: Requ
         segmentId: body.segmentId,
         scenarioId: body.scenarioId,
         scenarioVersionId: resolvedScenario.scenarioVersionId,
+        originTopicId,
         trainingId: canonicalTrainingId,
         trainingPackId: persistedTrainingPack?.id ?? null,
         clientStartedAt: parsedClientStartedAt?.toISOString() ?? null,

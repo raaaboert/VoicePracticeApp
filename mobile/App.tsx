@@ -3762,11 +3762,13 @@ export default function App() {
         // Do not block simulation start on local cache persistence issues.
       }
 
-      setSimulationReturnOrigin(simulationTopicReturnOrigin(setupOrigin, originScenarioSelection, {
+      const topicOrigin = simulationTopicReturnOrigin(setupOrigin, originScenarioSelection, {
         scenarioCatalogTab, trainingId: scenarioCatalogTab === "custom" ? activeTraining?.id ?? null : null,
         industryId, roleId: activeSegment.id, scenarioId: scenario.id,
-      }));
+      });
+      setSimulationReturnOrigin(topicOrigin);
       setSimulationConfig({
+        originTopicId: setupOriginTopicId(topicOrigin),
         simulationSessionId: createSimulationSessionId(),
         scenario,
         industryId,

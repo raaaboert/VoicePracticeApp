@@ -67,6 +67,7 @@ export interface MobileFocusTopicCatalogService {
 }
 
 interface MobileFocusTopicCatalogDependencies {
+  latestCompletedTopicPractice?: (userId: string, orgId: string, topicIds: readonly string[]) => Promise<Record<string, string>>;
   trainingPackStore: Pick<TrainingPackStore, "listTrainingPacksForOrg">;
   trainingContentStore: Pick<
     TrainingContentStore,
@@ -94,6 +95,9 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
     context: MobileFocusTopicCatalogContext
   ): Promise<MobileFocusTopicCatalogResponse> {
     const projections = await this.projectActionableTopics(context);
+    const practice = await this.dependencies.latestCompletedTopicPractice?.(
+      context.user.id, context.actingOrgId, projections.map(row => row.topic.id),
+    ) ?? {};
     return {
       topics: projections.map(({ topic, scenarios, resources }) => ({
         id: topic.id,
@@ -102,6 +106,8 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
         createdAt: resolveOrgTrainingCreatedAt(topic.createdAt, topic.updatedAt),
         scenarioCount: scenarios.length,
         resourceCount: resources.length,
+        latestAssignmentAt: latestApplicableAssignmentAt(context, topic),
+        lastCompletedPracticeAt: practice[topic.id] ?? null,
       })),
     };
   }
@@ -228,6 +234,16 @@ class DefaultMobileFocusTopicCatalogService implements MobileFocusTopicCatalogSe
       }
     }
   }
+}
+
+function latestApplicableAssignmentAt(context: MobileFocusTopicCatalogContext, topic: OrgTrainingRecord): string | null {
+  if (context.authorityMode !== "assignments") return null;
+  const timestamps = (context.authoritySnapshot?.assignments ?? []).filter(assignment =>
+    canFutureLearnerAccessFocusTopic({ user: context.user, users: context.users,
+      organization: { id: context.actingOrgId, status: context.organizationActive ? "active" : "disabled" },
+      topic, assignments: [assignment] }) && Number.isFinite(Date.parse(assignment.createdAt)),
+  ).map(row => row.createdAt);
+  return timestamps.sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
 }
 
 function selectVisibleActiveTopics(

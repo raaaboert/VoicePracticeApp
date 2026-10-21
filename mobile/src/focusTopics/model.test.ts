@@ -61,6 +61,14 @@ test("catalog parser accepts valid and empty responses while preserving server o
   assert.deepEqual(parseFocusTopicCatalogResponse({ topics: [] }), { topics: [] });
 });
 
+test("catalog recency timestamps are optional for older APIs and invalid values are ignored", () => {
+  const topic = { id: "topic", name: "Topic", description: "", createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: 1, resourceCount: 0 };
+  assert.deepEqual(parseFocusTopicCatalogResponse({ topics: [topic] }).topics, [topic]);
+  const current = { ...topic, latestAssignmentAt: "2026-10-01T00:00:00.000Z", lastCompletedPracticeAt: "2026-10-02T00:00:00.000Z" };
+  assert.deepEqual(parseFocusTopicCatalogResponse({ topics: [current] }).topics, [current]);
+  assert.deepEqual(parseFocusTopicCatalogResponse({ topics: [{ ...topic, latestAssignmentAt: "invalid", lastCompletedPracticeAt: {} }] }).topics, [topic]);
+});
+
 test("catalog parser rejects malformed summaries safely", () => {
   for (const value of [
     null,

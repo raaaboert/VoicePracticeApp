@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { MobileFocusTopicCatalogItem } from "@voicepractice/shared";
 import { createFocusTopicCatalogController, homeFocusTopicPreview } from "./catalog";
 
 function deferred<T>() {
@@ -29,6 +30,23 @@ test("missing learner activity uses deterministic company order, never global To
   assert.deepEqual(homeFocusTopicPreview(state), homeFocusTopicPreview(state));
   assert.deepEqual(state.topics, ordered, "Home must not reorder the full catalog");
   assert.deepEqual(homeFocusTopicPreview({ ...state, topics: [ordered[2]!] }), [ordered[2]]);
+});
+
+test("Home selects the latest applicable assignment or completed practice, with stable ties and unchanged full catalog", () => {
+  const assignment = { ...topics[0]!, latestAssignmentAt: "2026-10-19T12:00:00.000Z" };
+  const practiced = { ...topics[1]!, lastCompletedPracticeAt: "2026-10-18T12:00:00.000Z" };
+  const missing = topics[2]!;
+  const preview = (rows: MobileFocusTopicCatalogItem[]) => homeFocusTopicPreview({ topics: rows, loading: false, error: null });
+  assert.deepEqual(preview([practiced, missing, assignment]), [assignment, practiced], "new assignment outranks older practice");
+  const recent = { ...practiced, lastCompletedPracticeAt: "2026-10-20T12:00:00.000Z" };
+  assert.deepEqual(preview([assignment, missing, recent]), [recent, assignment], "new practice outranks assignment");
+  const both = { ...recent, latestAssignmentAt: "2026-10-21T12:00:00.000Z" };
+  assert.deepEqual(preview([assignment, both]), [both, assignment], "latest qualifying event wins");
+  const tie = { ...practiced, lastCompletedPracticeAt: assignment.latestAssignmentAt };
+  assert.deepEqual(preview([tie, assignment]), [tie, assignment]);
+  const rows = [missing, assignment, recent];
+  preview(rows);
+  assert.deepEqual(rows, [missing, assignment, recent], "no mutation of company catalog order");
 });
 
 test("loading, empty, error and retry remain distinct and never retain stale Topics", async () => {

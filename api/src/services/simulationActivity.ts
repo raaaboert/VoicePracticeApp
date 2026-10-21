@@ -60,7 +60,7 @@ export function estimatedSessionUsage(session: SimulationSessionRecord, now: Dat
     id: buildUsageSessionIdFromSimulationSessionId(session.simulationSessionId),
     userId: session.userId, orgId: session.orgId, divisionId: session.divisionId,
     segmentId: session.segmentId, scenarioId: session.scenarioId, scenarioVersionId: session.scenarioVersionId,
-    trainingId: session.trainingId, trainingPackId: session.trainingPackId,
+    trainingId: session.trainingId, trainingPackId: session.trainingPackId, originTopicId: session.originTopicId,
     startedAt: session.serverStartedAt, endedAt: activity.lastAt,
     rawDurationSeconds: Math.max(0, Math.floor(Math.min(activity.seconds, activity.maxSeconds))),
     createdAt: now.toISOString(),

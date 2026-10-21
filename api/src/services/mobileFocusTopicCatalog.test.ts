@@ -249,6 +249,7 @@ const emptyScenarioConfig: MobileFocusTopicCatalogContext["scenarioConfig"] = {
 };
 
 function harness(overrides: Partial<MobileFocusTopicCatalogContext> & {
+  latestCompletedTopicPractice?: (userId: string, orgId: string, topicIds: readonly string[]) => Promise<Record<string, string>>;
   packs?: TrainingPack[];
   records?: TrainingContentMobileReadRecord[];
   moduleEnabled?: boolean;
@@ -257,6 +258,7 @@ function harness(overrides: Partial<MobileFocusTopicCatalogContext> & {
   const records = overrides.records ?? [];
   const contentReads: Array<{ orgId: string; topicIds: readonly string[] }> = [];
   const service = createMobileFocusTopicCatalogService({
+    latestCompletedTopicPractice: overrides.latestCompletedTopicPractice,
     trainingPackStore: {
       async listTrainingPacksForOrg() { return packs; },
     },
@@ -633,6 +635,8 @@ test("resource eligibility supports all existing grants and exact uncapped disti
       createdAt: NOW,
       scenarioCount: 0,
       resourceCount: 504,
+      latestAssignmentAt: null,
+      lastCompletedPracticeAt: null,
     }],
   });
   assert.deepEqual(contentReads, [{ orgId: ORG_ID, topicIds: ["resources"] }]);
@@ -680,7 +684,7 @@ test("mixed, scenario-only, resource-only, and empty topics project only the nar
     { id: "scenario", scenarioCount: 1, resourceCount: 0 },
   ]);
   for (const projected of result.topics) {
-    assert.deepEqual(Object.keys(projected).sort(), ["createdAt", "description", "id", "name", "resourceCount", "scenarioCount"]);
+    assert.deepEqual(Object.keys(projected).sort(), ["createdAt", "description", "id", "lastCompletedPracticeAt", "latestAssignmentAt", "name", "resourceCount", "scenarioCount"]);
   }
 });
 
@@ -887,4 +891,26 @@ test("detail fails closed for missing, inactive, hidden, foreign, malformed, and
   for (const topicId of ["", "missing", "empty", "inactive", "hidden", "foreign"]) {
     assert.equal(await service.getDetail(context, topicId), null);
   }
+});
+
+
+test("recency uses only applicable learner assignment rules and a narrow authorized practice projection", async () => {
+  const older = "2020-01-01T00:00:00.000Z";
+  const scopedReads: unknown[] = [];
+  const { service, context } = harness({ authorityMode: "assignments", topics: [topic("a"), topic("b"), topic("hidden")],
+    authoritySnapshot: { scenarioAttachments: [], contentAttachments: [], assignments: [
+      directAssignment("a", { createdAt: older }),
+      directAssignment("a", { id: "direct", audience: "individual", subjectUserId: "learner", createdAt: NOW }),
+      directAssignment("a", { id: "other", audience: "individual", subjectUserId: "manager", createdAt: "2099-01-01T00:00:00.000Z" }),
+      directAssignment("a", { id: "revoked", createdAt: "2099-01-01T00:00:00.000Z", revokedAt: NOW }),
+      directAssignment("b", { audience: "manager_with_team", subjectUserId: "manager", createdAt: older }),
+    ] }, latestCompletedTopicPractice: async (...args) => { scopedReads.push(args); return { b: NOW }; },
+  });
+  const result = await service.getCatalog(context);
+  assert.deepEqual(result.topics.map(row => [row.id, row.latestAssignmentAt, row.lastCompletedPracticeAt]), [["a", NOW, null], ["b", older, NOW]]);
+  assert.deepEqual(scopedReads, [["learner", ORG_ID, ["a", "b"]]]);
+  context.user = { ...context.user, managerUserId: null };
+  assert.deepEqual((await service.getCatalog(context)).topics.map(row => row.id), ["a"], "dynamic audience reauthorizes current relationship");
+  context.authorityMode = "legacy";
+  assert.ok((await service.getCatalog(context)).topics.every(row => row.latestAssignmentAt === null), "legacy never invents assignment/access timestamps");
 });
