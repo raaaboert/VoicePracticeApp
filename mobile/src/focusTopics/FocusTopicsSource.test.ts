@@ -104,7 +104,7 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   const home = app.slice(homeStart, homeEnd);
 
   const focusEntry = home.indexOf("<HomeFocusTopicPreview");
-  const brandEntry = home.indexOf("style={styles.homeBrandStrip}");
+  const brandEntry = home.indexOf("styles.homeBrandStrip");
   const exploreEntry = home.indexOf('accessibilityRole="header">Explore');
   const scenarioEntry = home.indexOf('accessibilityLabel="Browse Scenarios"');
   const resourcesEntry = home.indexOf('accessibilityLabel="Open Learning Resources"');

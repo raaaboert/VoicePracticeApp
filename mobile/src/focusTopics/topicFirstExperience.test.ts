@@ -86,7 +86,7 @@ function homeHarness(overrides: Record<string, any> = {}, scheme = "soft_light")
     React: react, ScrollView: "ScrollView", View: "View", Text: "Text", Image: "Image",
     LinearGradient: "LinearGradient", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
     MaterialCommunityIcons: "Icon", HomeFocusTopicPreview: "HomeFocusTopicPreview",
-    styles: appStyles(theme), theme, APP_SURFACE_COLORS: surfaceColors, APP_BRAND_MARK: homeBrandMark,
+    styles: appStyles(theme), theme, colorScheme: scheme, APP_SURFACE_COLORS: surfaceColors, APP_BRAND_MARK: homeBrandMark,
     canOpenFocusTopics: true, focusTopicCatalog: { state: { topics: [], loading: false, error: null },
       controller: { refresh: () => events.push("retry") } }, setupSurfaceTheme: getTrainingContentTheme(scheme as "soft_light" | "classic_blue"),
     openHomeFocusTopics: (id?: string) => events.push(["topic", id]), trainingContentNotice: null,
@@ -109,7 +109,8 @@ test("Home composes authentic compact branding, Focus Topics and Explore in orde
   const resources = tree.findIndex(node => node.props.accessibilityLabel === "Open Learning Resources");
   assert.ok(brand >= 0 && brand < preview && preview < explore && explore < browse && browse < resources);
   assert.equal(tree[brand]!.props.accessible, true);
-  assert.equal(tree[brand]!.props.accessibilityLabel, "Peritio. Your practice workspace.");
+  assert.equal(tree[brand]!.props.accessibilityLabel, "Peritio. READY WHEN IT MATTERS.");
+  assert.ok(elements(tree[brand]).some(node => node.type === "Text" && node.props.children[0] === "READY WHEN IT MATTERS"));
   const mark = tree.find(node => node.type === "Image")!;
   assert.equal(mark.props.source, "./assets/PeritioLogo_061526.png");
   assert.equal(mark.props.resizeMode, "contain", "preserve the authentic emblem's angled framing");
@@ -157,7 +158,7 @@ test("Home branding is compact, wraps on narrow screens and retains readable lig
   for (const scheme of ["soft_light", "classic_blue"]) {
     const { tree, styles, theme } = homeHarness({}, scheme);
     const brand = tree.find(node => node.type === "LinearGradient")!;
-    const strip = brand.props.style;
+    const strip = Object.assign({}, ...brand.props.style);
     // The default emblem and padding take 90 points, rather than the former tall vertical hero.
     assert.equal(styles.homeBrandMark.height + strip.padding * 2 + strip.borderWidth * 2, 90);
     assert.equal(strip.height, undefined, "allow Dynamic Type to grow rather than clip text");
@@ -168,15 +169,44 @@ test("Home branding is compact, wraps on narrow screens and retains readable lig
       const availableCopyWidth = width - 32 - 2 * (strip.padding + strip.borderWidth) - styles.homeBrandMark.width - strip.gap;
       assert.ok(availableCopyWidth >= 150, "logo leaves room for wrapping copy at narrow phone widths");
     }
+    assert.ok(styles.homeBrandName.fontSize >= 24, "the dominant title qualifies as large text");
     for (const background of brand.props.colors) {
-      for (const foreground of [styles.homeBrandName.color, styles.homeBrandCaption.color]) {
-        assert.ok((luminance(foreground) + 0.05) / (luminance(background) + 0.05) >= 4.5);
-      }
+      // WCAG AA: large title >= 3:1, small tagline >= 4.5:1, including the softer light gradient.
+      assert.ok((luminance(styles.homeBrandName.color) + 0.05) / (luminance(background) + 0.05) >= 3);
+      assert.ok((luminance(styles.homeBrandCaption.color) + 0.05) / (luminance(background) + 0.05) >= 4.5);
     }
+    const caption = tree.find(node => node.type === "Text" && node.props.children[0] === "READY WHEN IT MATTERS")!;
+    assert.equal(caption.props.numberOfLines, undefined, "allow the tagline to wrap with large text");
+    assert.equal(caption.props.allowFontScaling, undefined, "retain native accessibility text scaling");
     assert.equal(styles.homeExploreTitle.color, theme.text);
     assert.equal(styles.homeExploreRule.backgroundColor, theme.border);
     assert.ok(styles.homeExploreHeading.marginTop > 0 && styles.homeExploreHeading.marginBottom > 0);
   }
+});
+
+test("Home polish softens only the light banner, adds Topic breathing room and preserves the compact dark treatment", () => {
+  const light = homeHarness();
+  const dark = homeHarness({}, "classic_blue");
+  const banner = (tree: Element[]) => tree.find(node => node.type === "LinearGradient")!;
+  assert.deepEqual(banner(dark.tree).props.colors, [surfaceColors.sageDeep, surfaceColors.sageEdge]);
+  const softened = [surfaceColors.sageDeep, surfaceColors.sageEdge].map(color => {
+    const cream = surfaceColors.cream.slice(1).match(/../g)!;
+    return "#" + color.slice(1).match(/../g)!.map((channel: string, i: number) =>
+      Math.round(parseInt(channel, 16) * 0.92 + parseInt(cream[i]!, 16) * 0.08).toString(16).padStart(2, "0")).join("");
+  });
+  assert.deepEqual(banner(light.tree).props.colors, softened);
+  for (const { tree, styles } of [light, dark]) {
+    const margin = Object.assign({}, ...banner(tree).props.style).marginBottom;
+    assert.equal(margin, 32);
+    assert.equal(margin - styles.homeBrandStrip.marginBottom, 12);
+    assert.equal(styles.homeBrandCaption.fontWeight, "600");
+    assert.equal(styles.homeBrandCaption.letterSpacing, 0.8);
+    assert.equal(styles.homeBrandCaption.color, surfaceColors.cream);
+    assert.ok(styles.homeBrandCaption.fontSize > 13 && styles.homeBrandCaption.fontSize < styles.homeBrandName.fontSize);
+  }
+  const individual = homeHarness({ canOpenFocusTopics: false });
+  assert.equal(Object.assign({}, ...banner(individual.tree).props.style).marginBottom, 20,
+    "extra separation belongs only between branding and Focus Topics");
 });
 
 const topics = Array.from({ length: 5 }, (_, i) => ({ id: `topic_${i}`, name: `Topic ${i}`, description: "Details",

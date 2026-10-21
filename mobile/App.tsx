@@ -4641,17 +4641,19 @@ export default function App() {
         showsVerticalScrollIndicator={false}
       >
         <LinearGradient
-          colors={[APP_SURFACE_COLORS.sageDeep, APP_SURFACE_COLORS.sageEdge]}
+          colors={colorScheme === "soft_light"
+            ? ["#676e61", "#5c6255"] // Existing olive stops softened with 8% brand cream.
+            : [APP_SURFACE_COLORS.sageDeep, APP_SURFACE_COLORS.sageEdge]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.homeBrandStrip}
+          style={[styles.homeBrandStrip, canOpenFocusTopics ? styles.homeBrandBeforeTopics : null]}
           accessible
-          accessibilityLabel="Peritio. Your practice workspace."
+          accessibilityLabel="Peritio. READY WHEN IT MATTERS."
         >
           <Image source={APP_BRAND_MARK} resizeMode="contain" style={styles.homeBrandMark} accessible={false} />
           <View style={styles.homeBrandCopy}>
             <Text style={styles.homeBrandName}>Peritio</Text>
-            <Text style={styles.homeBrandCaption}>Your practice workspace.</Text>
+            <Text style={styles.homeBrandCaption}>READY WHEN IT MATTERS</Text>
           </View>
         </LinearGradient>
 
@@ -7547,9 +7549,10 @@ function createStyles(theme: ThemeTokens) {
       marginBottom: 20,
     },
     homeBrandMark: { width: 64, height: 64, flexShrink: 0 },
+    homeBrandBeforeTopics: { marginBottom: 32 },
     homeBrandCopy: { flex: 1, minWidth: 0, gap: 3 },
     homeBrandName: { color: APP_SURFACE_COLORS.gold, fontSize: 26, lineHeight: 32, fontWeight: "700", letterSpacing: 0.4 },
-    homeBrandCaption: { color: APP_SURFACE_COLORS.cream, fontSize: 13, lineHeight: 19 },
+    homeBrandCaption: { color: APP_SURFACE_COLORS.cream, fontSize: 14, lineHeight: 20, fontWeight: "600", letterSpacing: 0.8 },
     homeExploreHeading: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 8, marginBottom: 12 },
     homeExploreTitle: { color: theme.text, fontSize: 18, lineHeight: 24, fontWeight: "800" },
     homeExploreRule: { flex: 1, height: 1, backgroundColor: theme.border },
