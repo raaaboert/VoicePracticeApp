@@ -57,6 +57,128 @@ const renderPreview = execute(previewSource, "HomeFocusTopicPreview", {
   React: react, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
   MaterialCommunityIcons: "Icon", homeFocusTopicPreview, styles: previewStyles,
 });
+
+// Render the actual Home ScrollView JSX, without booting unrelated auth, audio or menu hooks.
+const homeAst = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let homeContent = "";
+function findHomeContent(node: ts.Node) {
+  if (ts.isVariableDeclaration(node) && node.name.getText(homeAst) === "renderHome") {
+    const visit = (child: ts.Node) => {
+      if (ts.isJsxElement(child) && child.openingElement.tagName.getText(homeAst) === "ScrollView") {
+        homeContent = child.getText(homeAst);
+      } else ts.forEachChild(child, visit);
+    };
+    ts.forEachChild(node, visit);
+  } else ts.forEachChild(node, findHomeContent);
+}
+findHomeContent(homeAst);
+assert.ok(homeContent);
+const surfaceColors = execute(app, "APP_SURFACE_COLORS", {});
+const appThemes = execute(app, "APP_THEME_TOKENS", {});
+const homeBrandMark = execute(app, "APP_BRAND_MARK", { require: (path: string) => path });
+const appStyles = execute(app, "createStyles", { APP_SURFACE_COLORS: surfaceColors,
+  StyleSheet: { create: (styles: unknown) => styles } });
+
+function homeHarness(overrides: Record<string, any> = {}, scheme = "soft_light") {
+  const events: unknown[] = [];
+  const theme = appThemes[scheme];
+  const context = {
+    React: react, ScrollView: "ScrollView", View: "View", Text: "Text", Image: "Image",
+    LinearGradient: "LinearGradient", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
+    MaterialCommunityIcons: "Icon", HomeFocusTopicPreview: "HomeFocusTopicPreview",
+    styles: appStyles(theme), theme, APP_SURFACE_COLORS: surfaceColors, APP_BRAND_MARK: homeBrandMark,
+    canOpenFocusTopics: true, focusTopicCatalog: { state: { topics: [], loading: false, error: null },
+      controller: { refresh: () => events.push("retry") } }, setupSurfaceTheme: getTrainingContentTheme(scheme as "soft_light" | "classic_blue"),
+    openHomeFocusTopics: (id?: string) => events.push(["topic", id]), trainingContentNotice: null,
+    apiConfigured: true, entitlements: null, user: { isSuperUser: false }, activeSuperUserOrg: null,
+    trainingContentEnabled: true, isTrainingContentOpening: false, useIosCompactHomeLayout: false,
+    openTrainingContent: () => events.push("resources"), setSetupOrigin: (value: unknown) => events.push(["origin", value]),
+    setSetupSelectionIntent: () => {}, setSetupSelectionFailure: () => {}, setIsSetupScenarioSelectionExpanded: () => {},
+    setScreen: (value: string) => events.push(["screen", value]), ...overrides,
+  };
+  const render = execute(`const render = () => (${homeContent});`, "render", context);
+  return { tree: elements(render()), events, styles: context.styles, theme };
+}
+
+test("Home composes authentic compact branding, Focus Topics and Explore in order, with working destinations", () => {
+  const { tree, events } = homeHarness();
+  const brand = tree.findIndex(node => node.type === "LinearGradient");
+  const preview = tree.findIndex(node => node.type === "HomeFocusTopicPreview");
+  const explore = tree.findIndex(node => node.props.accessibilityRole === "header" && node.props.children[0] === "Explore");
+  const browse = tree.findIndex(node => node.props.accessibilityLabel === "Browse Scenarios");
+  const resources = tree.findIndex(node => node.props.accessibilityLabel === "Open Learning Resources");
+  assert.ok(brand >= 0 && brand < preview && preview < explore && explore < browse && browse < resources);
+  assert.equal(tree[brand]!.props.accessible, true);
+  assert.equal(tree[brand]!.props.accessibilityLabel, "Peritio. Your practice workspace.");
+  const mark = tree.find(node => node.type === "Image")!;
+  assert.equal(mark.props.source, "./assets/PeritioLogo_061526.png");
+  assert.equal(mark.props.resizeMode, "contain", "preserve the authentic emblem's angled framing");
+  assert.equal(mark.props.accessible, false, "the brand group already has one readable label");
+  assert.ok(readFileSync(new URL(`../../${homeBrandMark}`, import.meta.url)).length > 0);
+  assert.doesNotMatch(JSON.stringify(tree), /Active role|Setup opens with this role selected|Improve with precision|Voice practice|Scored feedback/);
+  tree[preview]!.props.onOpenTopic("topic");
+  tree[preview]!.props.onViewAll();
+  tree[preview]!.props.onRetry();
+  tree[browse]!.props.onPress();
+  tree[resources]!.props.onPress();
+  assert.deepEqual(events, [["topic", "topic"], ["topic", undefined], "retry", ["origin", null], ["screen", "setup"], "resources"]);
+});
+
+test("Home preserves authorized Learning Resources visibility, loading guard and individual setup", () => {
+  for (const canOpenFocusTopics of [true, false]) {
+    for (const trainingContentEnabled of [true, false]) {
+      const { tree, events } = homeHarness({ canOpenFocusTopics, trainingContentEnabled });
+      const resources = tree.filter(node => node.props.accessibilityLabel === "Open Learning Resources");
+      assert.equal(resources.length, trainingContentEnabled ? 1 : 0);
+      assert.equal(tree.filter(node => node.type === "HomeFocusTopicPreview").length, canOpenFocusTopics ? 1 : 0);
+      if (!canOpenFocusTopics) {
+        const setup = tree.find(node => node.type === "Pressable" &&
+          elements(node).some(child => child.type === "Text" && child.props.children[0] === "Continue to setup"))!;
+        setup.props.onPress();
+        assert.deepEqual(events, [["origin", null], ["screen", "setup"]]);
+      }
+      const loading = homeHarness({ canOpenFocusTopics, trainingContentEnabled, isTrainingContentOpening: true }).tree;
+      if (trainingContentEnabled) {
+        const button = loading.find(node => node.props.accessibilityLabel === "Open Learning Resources")!;
+        assert.equal(button.props.disabled, true);
+        assert.ok(elements(button).some(node => node.type === "ActivityIndicator"));
+      }
+    }
+  }
+});
+
+function luminance(hex: string) {
+  const channels = hex.slice(1).match(/../g)!.map(value => parseInt(value, 16) / 255)
+    .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+  return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+}
+
+test("Home branding is compact, wraps on narrow screens and retains readable light/dark contrast", () => {
+  for (const scheme of ["soft_light", "classic_blue"]) {
+    const { tree, styles, theme } = homeHarness({}, scheme);
+    const brand = tree.find(node => node.type === "LinearGradient")!;
+    const strip = brand.props.style;
+    // The default emblem and padding take 90 points, rather than the former tall vertical hero.
+    assert.equal(styles.homeBrandMark.height + strip.padding * 2 + strip.borderWidth * 2, 90);
+    assert.equal(strip.height, undefined, "allow Dynamic Type to grow rather than clip text");
+    assert.equal(styles.homeBrandCopy.flex, 1);
+    assert.equal(styles.homeBrandCopy.minWidth, 0);
+    assert.equal(strip.overflow, undefined);
+    for (const width of [320, 375]) {
+      const availableCopyWidth = width - 32 - 2 * (strip.padding + strip.borderWidth) - styles.homeBrandMark.width - strip.gap;
+      assert.ok(availableCopyWidth >= 150, "logo leaves room for wrapping copy at narrow phone widths");
+    }
+    for (const background of brand.props.colors) {
+      for (const foreground of [styles.homeBrandName.color, styles.homeBrandCaption.color]) {
+        assert.ok((luminance(foreground) + 0.05) / (luminance(background) + 0.05) >= 4.5);
+      }
+    }
+    assert.equal(styles.homeExploreTitle.color, theme.text);
+    assert.equal(styles.homeExploreRule.backgroundColor, theme.border);
+    assert.ok(styles.homeExploreHeading.marginTop > 0 && styles.homeExploreHeading.marginBottom > 0);
+  }
+});
+
 const topics = Array.from({ length: 5 }, (_, i) => ({ id: `topic_${i}`, name: `Topic ${i}`, description: "Details",
   createdAt: "2026-01-01T00:00:00.000Z", scenarioCount: i, resourceCount: 5 - i }));
 

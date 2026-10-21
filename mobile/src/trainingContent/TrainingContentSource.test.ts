@@ -16,17 +16,19 @@ test("Training Content is a first-class entitlement-controlled home module", () 
   const homeEnd = app.indexOf("const renderOnboarding");
   const home = app.slice(homeStart, homeEnd);
   const menu = home.slice(home.indexOf("<Modal"), home.indexOf("</Modal>"));
+  const individualSetup = home.indexOf("style={[styles.homePrimaryButton");
 
   assert.match(home, /trainingContentEnabled\s*\?\s*\(/);
   assert.match(home, /Browse all company learning materials\./);
   assert.match(home, /void openTrainingContent\(\)/);
+  assert.ok(individualSetup >= 0);
   assert.ok(
     home.indexOf('accessibilityLabel="Open Learning Resources"') <
-      home.indexOf("activeSegment ? (")
+      individualSetup
   );
   assert.ok(
     home.lastIndexOf('accessibilityLabel="Open Learning Resources"') >
-      home.indexOf("activeSegment ? (")
+      individualSetup
   );
   assert.doesNotMatch(menu, /Learning Resources/);
   assert.match(app, /screen === "training_content"/);

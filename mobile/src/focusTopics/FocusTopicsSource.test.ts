@@ -104,13 +104,15 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   const home = app.slice(homeStart, homeEnd);
 
   const focusEntry = home.indexOf("<HomeFocusTopicPreview");
+  const brandEntry = home.indexOf("style={styles.homeBrandStrip}");
+  const exploreEntry = home.indexOf('accessibilityRole="header">Explore');
   const scenarioEntry = home.indexOf('accessibilityLabel="Browse Scenarios"');
   const resourcesEntry = home.indexOf('accessibilityLabel="Open Learning Resources"');
-  const activeRole = home.indexOf("activeSegment ? (");
-  assert.ok(focusEntry >= 0 && focusEntry < scenarioEntry);
+  assert.ok(brandEntry >= 0 && brandEntry < focusEntry);
+  assert.ok(focusEntry < exploreEntry && exploreEntry < scenarioEntry);
   assert.ok(scenarioEntry < resourcesEntry);
-  assert.ok(resourcesEntry < activeRole);
-  assert.doesNotMatch(home, /styles\.heroCard|Improve with precision\.|<LinearGradient/);
+  assert.doesNotMatch(home, /styles\.heroCard|Improve with precision\.|Voice practice|Scenario drills|Scored feedback/);
+  assert.match(home, /source=\{APP_BRAND_MARK\} resizeMode="contain"/);
   assert.match(home, /state=\{focusTopicCatalog\.state\}/);
   assert.match(home, /onOpenTopic=\{openHomeFocusTopics\}/);
   assert.match(home, /onViewAll=\{\(\) => openHomeFocusTopics\(\)\}/);
@@ -121,9 +123,7 @@ test("Home makes Focus Topics primary for eligible users while retaining setup a
   assert.match(home, /setSetupOrigin\(null\)/);
   assert.match(home, /setScreen\("setup"\)/);
   assert.match(home, /void openTrainingContent\(\)/);
-  assert.match(home, />Active role<\/Text>/);
-  assert.match(home, />Ready<\/Text>/);
-  assert.match(home, /Setup opens with this role selected\./);
+  assert.doesNotMatch(home, /activeSegment|Active role|Setup opens with this role selected\./);
   assert.match(app, /screen === "focus_topics"/);
 });
 
@@ -138,7 +138,7 @@ test("individual Home retains its existing setup-first hierarchy", () => {
     enterpriseBranchStart
   );
   const individualBranchStart = home.lastIndexOf("<Pressable", individualSetupStyle);
-  const individualBranch = home.slice(individualBranchStart, home.indexOf("{activeSegment ? ("));
+  const individualBranch = home.slice(individualBranchStart, home.indexOf("{!canOpenFocusTopics && trainingContentEnabled ? ("));
 
   assert.ok(enterpriseBranchStart >= 0);
   assert.ok(individualSetupStyle >= 0);
@@ -159,8 +159,8 @@ test("eligible enterprise Home renders Learning Resources only in the grouped de
   const groupedStart = home.indexOf('<View style={styles.homeDestinationGroup}>');
   const individualSetupStyle = home.indexOf("style={[styles.homePrimaryButton", groupedStart);
   const groupedDestinations = home.slice(groupedStart, individualSetupStyle);
-  const activeRoleStart = home.indexOf("{activeSegment ? (", individualSetupStyle);
-  const afterActiveRole = home.slice(activeRoleStart);
+  const standaloneStart = home.indexOf("{!canOpenFocusTopics && trainingContentEnabled ? (", individualSetupStyle);
+  const standaloneDestinations = home.slice(standaloneStart);
 
   assert.ok(groupedStart >= 0);
   assert.ok(individualSetupStyle > groupedStart);
@@ -168,9 +168,10 @@ test("eligible enterprise Home renders Learning Resources only in the grouped de
     groupedDestinations.match(/accessibilityLabel="Open Learning Resources"/g)?.length,
     1
   );
-  assert.match(afterActiveRole, /\{!canOpenFocusTopics && trainingContentEnabled \? \(/);
+  assert.ok(standaloneStart > individualSetupStyle);
+  assert.match(standaloneDestinations, /\{!canOpenFocusTopics && trainingContentEnabled \? \(/);
   assert.equal(
-    afterActiveRole.match(/accessibilityLabel="Open Learning Resources"/g)?.length,
+    standaloneDestinations.match(/accessibilityLabel="Open Learning Resources"/g)?.length,
     1
   );
 });

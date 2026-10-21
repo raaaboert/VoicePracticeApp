@@ -398,6 +398,7 @@ const IOS_VOICE_SAMPLE_TIMEOUT_MS = 30_000;
 const LEGACY_ORG_TRAINING_MIGRATION_DESCRIPTION =
   "Auto-created to preserve existing enterprise training assets during the training-first workspace migration.";
 const APP_STARTUP_ART = require("./peritio-source-splash.png");
+const APP_BRAND_MARK = require("./assets/PeritioLogo_061526.png");
 const APP_SURFACE_COLORS = {
   sage: "#697364",
   sageDeep: "#5a6357",
@@ -4639,6 +4640,21 @@ export default function App() {
         contentContainerStyle={styles.homeScrollContent}
         showsVerticalScrollIndicator={false}
       >
+        <LinearGradient
+          colors={[APP_SURFACE_COLORS.sageDeep, APP_SURFACE_COLORS.sageEdge]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.homeBrandStrip}
+          accessible
+          accessibilityLabel="Peritio. Your practice workspace."
+        >
+          <Image source={APP_BRAND_MARK} resizeMode="contain" style={styles.homeBrandMark} accessible={false} />
+          <View style={styles.homeBrandCopy}>
+            <Text style={styles.homeBrandName}>Peritio</Text>
+            <Text style={styles.homeBrandCaption}>Your practice workspace.</Text>
+          </View>
+        </LinearGradient>
+
         {canOpenFocusTopics ? <HomeFocusTopicPreview state={focusTopicCatalog.state} theme={setupSurfaceTheme}
           onOpenTopic={openHomeFocusTopics} onViewAll={() => openHomeFocusTopics()}
           onRetry={() => { void focusTopicCatalog.controller.refresh(); }} /> : null}
@@ -4672,6 +4688,11 @@ export default function App() {
             </Text>
           </View>
         ) : null}
+
+        <View style={styles.homeExploreHeading}>
+          <Text style={styles.homeExploreTitle} accessibilityRole="header">Explore</Text>
+          <View style={styles.homeExploreRule} />
+        </View>
 
         {canOpenFocusTopics ? (
           <View style={styles.homeDestinationGroup}>
@@ -4746,22 +4767,6 @@ export default function App() {
             <Text style={styles.homePrimaryButtonText} maxFontSizeMultiplier={1.1}>Continue to setup</Text>
           </Pressable>
         )}
-
-        {activeSegment ? (
-          <View style={[styles.card, styles.segmentCard]}>
-            <View style={styles.segmentHeaderRow}>
-              <View style={styles.segmentHeaderCopy}>
-                <Text style={styles.segmentLabel}>Active role</Text>
-                <Text style={styles.segmentTitle}>{activeSegment.label}</Text>
-              </View>
-              <View style={styles.segmentBadge}>
-                <Text style={styles.segmentBadgeText}>Ready</Text>
-              </View>
-            </View>
-            <Text style={styles.segmentSummary}>{activeSegment.summary}</Text>
-            <Text style={styles.segmentFootnote}>Setup opens with this role selected.</Text>
-          </View>
-        ) : null}
 
         {!canOpenFocusTopics && trainingContentEnabled ? (
           <Pressable
@@ -7531,6 +7536,23 @@ function createStyles(theme: ThemeTokens) {
     },
     homeFillCompact: { justifyContent: "flex-start" },
     homeScrollContent: { paddingBottom: 18 },
+    homeBrandStrip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 14,
+      padding: 12,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: APP_SURFACE_COLORS.sage,
+      marginBottom: 20,
+    },
+    homeBrandMark: { width: 64, height: 64, flexShrink: 0 },
+    homeBrandCopy: { flex: 1, minWidth: 0, gap: 3 },
+    homeBrandName: { color: APP_SURFACE_COLORS.gold, fontSize: 26, lineHeight: 32, fontWeight: "700", letterSpacing: 0.4 },
+    homeBrandCaption: { color: APP_SURFACE_COLORS.cream, fontSize: 13, lineHeight: 19 },
+    homeExploreHeading: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 8, marginBottom: 12 },
+    homeExploreTitle: { color: theme.text, fontSize: 18, lineHeight: 24, fontWeight: "800" },
+    homeExploreRule: { flex: 1, height: 1, backgroundColor: theme.border },
     centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
     topRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
     homeTopRowCompact: { marginBottom: 8 },
@@ -7570,34 +7592,6 @@ function createStyles(theme: ThemeTokens) {
     trainingModuleCopy: { flex: 1, minWidth: 0, gap: 4 },
     trainingModuleTitle: { color: theme.text, fontSize: 18, lineHeight: 22, fontWeight: "800" },
     trainingModuleBody: { color: theme.textMuted, fontSize: 13.5, lineHeight: 19 },
-    segmentCard: {
-      marginTop: 4,
-      borderColor: theme.accent,
-      backgroundColor: theme.currentPlanCardBg,
-      shadowColor: APP_SURFACE_COLORS.shadow,
-      shadowOpacity: 0.09,
-      shadowRadius: 10,
-      shadowOffset: { width: 0, height: 6 },
-      elevation: 2,
-    },
-    segmentHeaderRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
-    segmentHeaderCopy: { flex: 1, gap: 2 },
-    segmentLabel: { color: APP_SURFACE_COLORS.goldMuted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.9 },
-    segmentTitle: { color: theme.text, fontSize: 24, fontWeight: "800", lineHeight: 28 },
-    segmentSummary: { color: theme.text, fontSize: 14.5, lineHeight: 21, fontWeight: "600" },
-    segmentBadge: {
-      minHeight: 30,
-      borderRadius: 999,
-      borderWidth: 1,
-      borderColor: theme.accent,
-      backgroundColor: theme.accent,
-      alignItems: "center",
-      justifyContent: "center",
-      paddingHorizontal: 11,
-      paddingVertical: 6,
-    },
-    segmentBadgeText: { color: theme.primaryButtonText, fontSize: 11.5, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
-    segmentFootnote: { color: theme.textMuted, fontSize: 12.5, lineHeight: 18 },
     title: { color: theme.text, fontSize: 23, fontWeight: "700" },
     label: { color: theme.accent, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 },
     body: { color: theme.textMuted, fontSize: 14.5, lineHeight: 21 },
