@@ -58,6 +58,74 @@ test("backfill reports dangling and cross-org relations instead of repairing the
   assert.equal(plan.contentAttachments.length,0);
 });
 
+test("custom scenario IDs are organization-scoped regardless of inventory order", () => {
+  const input = base();
+  input.organizations = [...input.organizations, { id: "other", status: "active" } as any];
+  input.topics = [...input.topics, { id: "topic", orgId: "other", status: "active" } as any];
+  input.scenarioAttachments = ["org", "other"].map((orgId) => ({
+    id: `attachment_${orgId}`, orgId, trainingId: "topic", scenarioId: "shared", createdAt: NOW, updatedAt: NOW,
+  }));
+  const definitions = [
+    { id: "shared", orgId: "org", enabled: true },
+    { id: "shared", orgId: "other", enabled: true },
+  ] as any;
+  for (const scenarios of [definitions, [...definitions].reverse()]) {
+    input.customScenarios = scenarios;
+    const plan = buildFocusTopicAuthorityBackfillPlan(input);
+    assert.deepEqual(plan.issues, []);
+    assert.deepEqual(plan.scenarioAttachments.map(row => [row.orgId, row.scenarioId]).sort(),
+      [["org", "shared"], ["other", "shared"]]);
+  }
+});
+
+test("disabled local scenarios retain their attachments without borrowing enabled foreign definitions", () => {
+  const input = base();
+  input.customScenarios = [
+    { id: "shared", orgId: "org", enabled: false },
+    { id: "shared", orgId: "other", enabled: true },
+  ] as any;
+  input.scenarioAttachments = [{ id: "attachment", orgId: "org", trainingId: "topic", scenarioId: "shared", createdAt: NOW, updatedAt: NOW }];
+  const before = structuredClone(input);
+  const plan = buildFocusTopicAuthorityBackfillPlan(input);
+  assert.deepEqual(plan.issues, []);
+  assert.deepEqual(plan.scenarioAttachments.map(row => [row.orgId, row.topicId, row.scenarioId]), [["org", "topic", "shared"]]);
+  assert.deepEqual(plan.assignments, [], "disabled attachments do not create learner access");
+  assert.deepEqual(input, before, "planning never enables or rewrites either organization's definitions");
+});
+
+test("valid local custom scenarios resolve alongside existing content attachments", () => {
+  const input = base();
+  input.customScenarios = [{ id: "local", orgId: "org", enabled: true } as any];
+  input.scenarioAttachments = [{ id: "attachment", orgId: "org", trainingId: "topic", scenarioId: "local", createdAt: NOW, updatedAt: NOW }];
+  input.contentItems = [{ id: "content", orgId: "org", focusTopicId: "topic" } as any];
+  const plan = buildFocusTopicAuthorityBackfillPlan(input);
+  assert.deepEqual(plan.issues, []);
+  assert.equal(plan.scenarioAttachments[0]?.scenarioId, "local");
+  assert.equal(plan.contentAttachments[0]?.contentId, "content");
+});
+
+test("foreign-only custom scenario references remain cross-org integrity issues", () => {
+  const input = base();
+  input.customScenarios = [{ id: "foreign", orgId: "other", enabled: true } as any];
+  input.scenarioAttachments = [{ id: "attachment", orgId: "org", trainingId: "topic", scenarioId: "foreign", createdAt: NOW, updatedAt: NOW }];
+  const plan = buildFocusTopicAuthorityBackfillPlan(input);
+  assert.deepEqual(plan.issues, [{ code: "cross_org_scenario", source: "org_scenario", orgId: "org", topicId: "topic", relationId: "foreign" }]);
+  assert.deepEqual(plan.scenarioAttachments, []);
+});
+
+test("incorrect declared ownership is not repaired from an organization's containing collection", () => {
+  const input = base();
+  const incorrectlyOwned = { id: "misowned", orgId: "other", enabled: false } as any;
+  input.organizations = [{ ...input.organizations[0]!, customScenarios: [incorrectlyOwned] }];
+  input.customScenarios = [incorrectlyOwned];
+  input.scenarioAttachments = [{ id: "attachment", orgId: "org", trainingId: "topic", scenarioId: "misowned", createdAt: NOW, updatedAt: NOW }];
+  const before = structuredClone(input);
+  const plan = buildFocusTopicAuthorityBackfillPlan(input);
+  assert.equal(plan.issues[0]?.code, "cross_org_scenario");
+  assert.deepEqual(plan.scenarioAttachments, []);
+  assert.deepEqual(input, before);
+});
+
 test("requiredScenario subset broadening is explicit with actors and exact scenario sets", () => {
   const input=base(); input.trainingPacks=[{id:"pack",organizationId:"org",active:true,requiredBehavioralTriggers:["scenario:s1","scenario:s2"]} as any];
   input.packAttachments=[{id:"pa",orgId:"org",trainingId:"topic",trainingPackId:"pack",createdAt:NOW} as any];

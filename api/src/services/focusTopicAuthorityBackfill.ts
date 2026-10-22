@@ -116,7 +116,9 @@ export function buildFocusTopicAuthorityBackfillPlan(
   const topicsById = new Map<string, OrgTrainingRecord[]>();
   for (const topic of input.topics) topicsById.set(topic.id, [...(topicsById.get(topic.id) ?? []), topic]);
   const packsById = new Map(input.trainingPacks.map((pack) => [pack.id, pack]));
-  const customById = new Map(input.customScenarios.map((scenario) => [scenario.id, scenario]));
+  // Custom scenario IDs are unique within an organization, not across organizations.
+  const customByOrgAndId = new Map(input.customScenarios.map((scenario) => [JSON.stringify([scenario.orgId, scenario.id]), scenario]));
+  const customIds = new Set(input.customScenarios.map((scenario) => scenario.id));
   const issues: FocusTopicBackfillIssue[] = [];
   const contentAttachments: FocusTopicContentAttachment[] = [];
   const scenarioAttachments: FocusTopicScenarioAttachment[] = [];
@@ -151,13 +153,9 @@ export function buildFocusTopicAuthorityBackfillPlan(
       issues.push(issue((topicsById.get(attachment.trainingId)?.length ?? 0) > 0 ? "cross_org_topic" : "missing_topic", "org_scenario", attachment.orgId, attachment.trainingId, attachment.scenarioId));
       continue;
     }
-    const scenario = customById.get(attachment.scenarioId);
+    const scenario = customByOrgAndId.get(JSON.stringify([attachment.orgId, attachment.scenarioId]));
     if (!scenario) {
-      issues.push(issue("missing_scenario", "org_scenario", attachment.orgId, topic.id, attachment.scenarioId));
-      continue;
-    }
-    if (scenario.orgId !== attachment.orgId) {
-      issues.push(issue("cross_org_scenario", "org_scenario", attachment.orgId, topic.id, attachment.scenarioId));
+      issues.push(issue(customIds.has(attachment.scenarioId) ? "cross_org_scenario" : "missing_scenario", "org_scenario", attachment.orgId, topic.id, attachment.scenarioId));
       continue;
     }
     addScenario(scenarioAttachments, seenScenarios, issues, {

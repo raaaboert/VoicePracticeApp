@@ -294,6 +294,11 @@ function buildShadowReport(
   plan: ReturnType<typeof buildFocusTopicAuthorityBackfillPlan>
 ) {
   const legacy: FocusTopicProjection[] = inventory.legacyVisibility.map((row) => ({ ...row, topicOrgId: inventory.topics.find((topic) => topic.id === row.topicId && topic.orgId === row.orgId)?.orgId ?? "" }));
+  // Preserve disabled local attachments in the plan, but do not report them as
+  // learner-visible scenarios. An enabled same-ID foreign definition cannot qualify.
+  const enabledCustomScenarioKeys = new Set(inventory.customScenarios
+    .filter((scenario) => scenario.enabled === true)
+    .map((scenario) => JSON.stringify([scenario.orgId, scenario.id])));
   const future: FocusTopicProjection[] = [];
   for (const user of inventory.users) {
     const organization = inventory.organizations.find((org) => org.id === user.orgId);
@@ -303,7 +308,8 @@ function buildShadowReport(
       future.push({
         orgId:organization.id,userId:user.id,topicId:topic.id,topicOrgId:topic.orgId,
         standardScenarioIds:plan.scenarioAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id&&row.scenarioKind==="standard").map((row)=>row.scenarioId),
-        orgScenarioIds:plan.scenarioAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id&&row.scenarioKind==="org").map((row)=>row.scenarioId),
+        orgScenarioIds:plan.scenarioAttachments.filter((row)=>row.orgId===organization.id&&row.topicId===topic.id&&row.scenarioKind==="org"
+          && enabledCustomScenarioKeys.has(JSON.stringify([row.orgId, row.scenarioId]))).map((row)=>row.scenarioId),
         contentIds:projectPublishedFocusTopicContentIds({
           orgId:organization.id,
           topicId:topic.id,

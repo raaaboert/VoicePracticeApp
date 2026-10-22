@@ -14,6 +14,13 @@ const execute = promisify(execFile);
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const baseline = "aa79a9d1fbac6704eb1d0033af81c6342538073d";
 const databaseUrl = process.env.FOCUS_TOPIC_AUTHORITY_INTEGRATION_DATABASE_URL?.trim();
+const sharedScenarioIds = [
+  "healthcare_crm_replacement_conversation",
+  "hospital_scheduling_software_discovery_call",
+  "medical_software_sales_behavioral_interview",
+  "medical_software_sales_final_interview_case",
+  "physician_stakeholder_buy_in_meeting",
+];
 
 async function cli(url: string, args: string[], script = "backfill-focus-topic-authority") {
   try {
@@ -105,6 +112,19 @@ for (const nonempty of [false, true]) {
           orgTrainings: nonempty ? [{ id: "topic", orgId: "org", status: "active", createdAt: now }] : [],
           orgTrainingScenarioAttachments: nonempty ? [{ orgId: "org", trainingId: "topic", scenarioId: "scenario", createdAt: now }] : [],
           orgTrainingPackAttachments: [], trainingPackAssignments: [], orgDivisions: [], orgStandardScenarioDivisionAssignments: [] };
+        if (nonempty) {
+          state.orgs[0]!.customScenarios.push(...sharedScenarioIds.map(id => ({
+            id, orgId: "org", segmentId: "role", enabled: false,
+            applicableIndustryIds: ["sales"], createdAt: now,
+          })));
+          state.orgs.push({ ...state.orgs[0]!, id: "other", customScenarios: sharedScenarioIds.map(id => ({
+            id, orgId: "other", segmentId: "role", enabled: true,
+            applicableIndustryIds: ["sales"], createdAt: now,
+          })) });
+          state.orgTrainingScenarioAttachments.push(...sharedScenarioIds.map(scenarioId => ({
+            orgId: "org", trainingId: "topic", scenarioId, createdAt: now,
+          })));
+        }
         await local.pool.query("INSERT INTO app_state (id,state_json) VALUES ('primary',$1::jsonb)", [JSON.stringify(state)]);
         if (nonempty) {
           await local.pool.query(`INSERT INTO org_content_categories
@@ -119,6 +139,17 @@ for (const nonempty of [false, true]) {
         assert.equal(plan.mode, "plan"); assert.equal(plan.plan.summary.assignmentCount, nonempty ? 1 : 0);
         assert.equal((await local.pool.query("SELECT to_regclass('focus_topic_backfill_runs') AS table_name")).rows[0].table_name, null,
           "PLAN remains read-only, including no authority DDL");
+        if (nonempty) await t.test("PLAN retains five disabled local attachments with enabled foreign ID collisions without manufacturing visibility", async () => {
+          assert.deepEqual(plan.plan.issues, []);
+          assert.equal(plan.plan.summary.scenarioAttachmentCount, 6);
+          assert.deepEqual(plan.plan.scenarioAttachments.map((row: { scenarioId: string }) => row.scenarioId).sort(),
+            ["scenario", ...sharedScenarioIds].sort());
+          assert.deepEqual(plan.shadow, { clean: true, blocking: [], expectedSignoff: [] });
+          assert.equal(plan.plan.assignments.length, 1, "only the original visible scenario supplies learner access");
+          assert.equal(plan.plan.assignments[0].orgId, "org");
+          assert.deepEqual((await local.pool.query("SELECT state_json FROM app_state WHERE id='primary'")).rows[0].state_json,
+            state, "read-only PLAN leaves local disabled and foreign enabled definitions unchanged");
+        });
         const applied = await successful("--apply");
         const runId = applied.run.id;
         const stored = async () => (await local.pool.query("SELECT *, xmin::text AS row_version FROM focus_topic_backfill_runs WHERE id=$1", [runId])).rows[0];
