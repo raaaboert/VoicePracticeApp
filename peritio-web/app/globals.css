@@ -3114,6 +3114,76 @@ input[type="radio"] {
   border: 0;
 }
 
+.training-content-topic-selector,
+.training-content-scoped-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.training-content-topic-selector {
+  grid-column: 1 / -1;
+}
+
+.training-content-topic-selector legend,
+.training-content-scoped-fields legend {
+  padding: 0 0 0.5rem;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.training-content-topic-selector .assignment-chip > span,
+.training-content-topic-selector input[type="search"] {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.training-content-topic-options {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.training-content-topic-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.training-content-topic-option.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.training-content-topic-option > span {
+  display: grid;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.training-content-topic-option input {
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.training-content-topic-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .scenario-selector-heading {
   display: flex;
   align-items: flex-start;

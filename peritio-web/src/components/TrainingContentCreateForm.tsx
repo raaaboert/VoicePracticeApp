@@ -22,6 +22,7 @@ import type {
 } from "@voicepractice/shared";
 
 import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
+import { TrainingContentTopicSelector } from "@/src/components/TrainingContentTopicSelector";
 import { TrainingContentScenarioSelector } from "@/src/components/TrainingContentScenarioSelector";
 import { fetchAdminApiJson } from "@/src/lib/adminApiClient";
 import {
@@ -52,7 +53,9 @@ export function TrainingContentCreateForm({
   categories,
   focusTopics,
   scenarioOptions,
+  topicLoadError,
 }: {
+  topicLoadError?: string;
   orgId: string | null;
   categories: DashboardTrainingContentCategory[];
   focusTopics: DashboardTrainingContentFocusTopic[];
@@ -66,7 +69,7 @@ export function TrainingContentCreateForm({
   const [categoryId, setCategoryId] = useState(defaultCategoryId);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [focusTopicId, setFocusTopicId] = useState("");
+  const [focusTopicIds, setFocusTopicIds] = useState<string[]>([]);
   const [nativeBody, setNativeBody] = useState("");
   const [externalUrl, setExternalUrl] = useState("");
   const [relatedScenarios, setRelatedScenarios] =
@@ -80,7 +83,7 @@ export function TrainingContentCreateForm({
     contentType
     || title
     || description
-    || focusTopicId
+    || focusTopicIds.length > 0
     || nativeBody
     || externalUrl
     || relatedScenariosTouched
@@ -123,7 +126,7 @@ export function TrainingContentCreateForm({
         categoryId,
         title,
         description,
-        focusTopicId: focusTopicId || null,
+        focusTopicIds,
         ...buildCreateRelatedScenarioIdsField(relatedScenarios, relatedScenariosTouched),
       };
       if (contentType === "native") {
@@ -241,22 +244,8 @@ export function TrainingContentCreateForm({
                   ))}
                 </select>
               </label>
-              <label className="field-label">
-                Related Focus Topic
-                <select
-                  className="text-input"
-                  value={focusTopicId}
-                  onChange={(event) => setFocusTopicId(event.target.value)}
-                  disabled={saving}
-                >
-                  <option value="">None</option>
-                  {focusTopics.map((topic) => (
-                    <option key={topic.id} value={topic.id}>
-                      {topic.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <TrainingContentTopicSelector options={focusTopics} selectedIds={focusTopicIds}
+                onChange={setFocusTopicIds} disabled={saving} error={topicLoadError} onRetry={() => router.refresh()} />
               <TrainingContentScenarioSelector
                 options={scenarioOptions}
                 selected={relatedScenarios}

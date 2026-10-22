@@ -224,6 +224,7 @@ function scenarioLink(
 }
 
 class FakeStore implements TrainingContentStore {
+  async listTopicAttachmentsForContents(): Promise<Array<{ contentId: string; topicId: string }>> { return []; }
   records: TrainingContentMobileReadRecord[] = [];
   scenarioLinks: TrainingContentScenarioLink[] = [];
   scenarioLinkReads: Array<[string, string]> = [];

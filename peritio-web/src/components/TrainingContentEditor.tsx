@@ -41,6 +41,8 @@ import type {
 } from "@voicepractice/shared";
 
 import { TrainingContentMarkdown } from "@/src/components/TrainingContentMarkdown";
+import { TrainingContentTopicSelector } from "@/src/components/TrainingContentTopicSelector";
+import { selectedContentTopicIds, sameTopicIds } from "@/src/lib/trainingContentTopicSelection";
 import { TrainingContentScenarioSelector } from "@/src/components/TrainingContentScenarioSelector";
 import { UnsavedChangesDialog } from "@/src/components/UnsavedChangesDialog";
 import {
@@ -81,7 +83,7 @@ interface ContentDraft {
   categoryId: string;
   title: string;
   description: string;
-  focusTopicId: string;
+  focusTopicIds: string[];
   nativeBody: string;
   externalUrl: string;
 }
@@ -98,7 +100,7 @@ function createDraft(item: DashboardTrainingContentDetail): ContentDraft {
     categoryId: item.categoryId,
     title: item.title,
     description: item.description,
-    focusTopicId: item.focusTopicId ?? "",
+    focusTopicIds: selectedContentTopicIds(item),
     nativeBody: item.nativeBody ?? "",
     externalUrl: item.externalUrl ?? "",
   };
@@ -150,8 +152,9 @@ function buildMetadataPatch(
   if (draft.description !== item.description) {
     patch.description = draft.description;
   }
-  if ((draft.focusTopicId || null) !== item.focusTopicId) {
-    patch.focusTopicId = draft.focusTopicId || null;
+  if (!sameTopicIds(draft.focusTopicIds, selectedContentTopicIds(item))) {
+    patch.focusTopicIds = draft.focusTopicIds;
+    patch.expectedFocusTopicIds = selectedContentTopicIds(item);
   }
   if (item.contentType === "native" && draft.nativeBody !== (item.nativeBody ?? "")) {
     patch.nativeBody = draft.nativeBody || null;
@@ -169,7 +172,7 @@ function hasMetadataChanges(
   return Object.keys(buildMetadataPatch(item, draft)).length > 1;
 }
 
-function withOrg(pathname: string, orgId: string | null): string {
+function withEditorOrg(pathname: string, orgId: string | null): string {
   if (!orgId) {
     return pathname;
   }
@@ -177,7 +180,7 @@ function withOrg(pathname: string, orgId: string | null): string {
   return `${pathname}${separator}orgId=${encodeURIComponent(orgId)}`;
 }
 
-function errorDetails(error: unknown): string[] {
+function errorDetails(error: unknown, directTopics = false): string[] {
   if (!(error instanceof AdminApiClientError)) {
     return [];
   }
@@ -186,7 +189,9 @@ function errorDetails(error: unknown): string[] {
     return [];
   }
   const labels: Record<string, string> = {
-    assignment_required: "Add at least one availability assignment.",
+    assignment_required: directTopics
+      ? "Keep an Active Topic attachment or an availability assignment for published content."
+      : "Add at least one availability assignment.",
     native_body_required: "Add Native content before publishing.",
     https_url_required: "Add a valid HTTPS URL before publishing.",
     ready_asset_required: "Finish a valid file upload before publishing.",
@@ -203,6 +208,9 @@ export function TrainingContentEditor({
   scenarioOptions,
   fileLimits,
   orgId,
+  returnTopicId,
+  topicScoped = false,
+  topicLoadError,
 }: {
   initialItem: DashboardTrainingContentDetail;
   categories: DashboardTrainingContentCategory[];
@@ -210,8 +218,15 @@ export function TrainingContentEditor({
   scenarioOptions: DashboardTrainingContentScenarioOption[];
   fileLimits: TrainingContentFileLimitsBytes;
   orgId: string | null;
+  returnTopicId?: string;
+  topicScoped?: boolean;
+  topicLoadError?: string;
 }) {
   const router = useRouter();
+  const withOrg = (path: string, selectedOrgId: string | null) => {
+    const base = withEditorOrg(path, selectedOrgId);
+    return topicScoped && returnTopicId ? base + (base.includes("?") ? "&" : "?") + "topicId=" + encodeURIComponent(returnTopicId) : base;
+  };
   const [item, setItem] = useState(initialItem);
   const [draft, setDraft] = useState(() => createDraft(initialItem));
   const [assignments, setAssignments] = useState(() => createAssignmentDraft(initialItem));
@@ -248,7 +263,9 @@ export function TrainingContentEditor({
     || hasTrainingContentScenarioSelectionChanges(item.relatedScenarios, relatedScenarios);
   const policy = getTrainingContentFilePolicy(item.contentType);
   const videoUploadBlocked = trainingContentVideoUploadIsBlocked(latestVideoUploadAsset);
-  const listPath = `/app/admin/training-content${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""}`;
+  const listPath = returnTopicId
+    ? "/app/admin/focus-topics?topicId=" + encodeURIComponent(returnTopicId) + (orgId ? "&orgId=" + encodeURIComponent(orgId) : "")
+    : "/app/admin/training-content" + (orgId ? "?orgId=" + encodeURIComponent(orgId) : "");
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -418,7 +435,7 @@ export function TrainingContentEditor({
   const handleError = (caught: unknown, fallback: string) => {
     const nextError = caught instanceof Error ? caught.message : fallback;
     setError(nextError);
-    setErrorItems(errorDetails(caught));
+    setErrorItems(errorDetails(caught, item.focusTopicAuthority === "assignments"));
     setConflict(
       caught instanceof AdminApiClientError
       && caught.code === "training_content_conflict"
@@ -742,9 +759,10 @@ export function TrainingContentEditor({
         disabled={saving || uploading}
       >
         <ArrowLeft size={17} aria-hidden="true" />
-        Back to Learning Resources
+        {returnTopicId ? "Back to Focus Topic" : "Back to Learning Resources"}
       </button>
       {message ? <div className="notice success">{message}</div> : null}
+      {topicScoped ? <p className="notice">You are editing within your Topic management scope. Category, source text, scenario links, recipient assignments, and Topic selections require Organization Admin access. Manage individual Topic attachments from the Topic workspace.</p> : null}
       {error ? (
         <div className="notice danger">
           <strong>{error}</strong>
@@ -798,11 +816,12 @@ export function TrainingContentEditor({
             <select
               className="text-input"
               value={draft.categoryId}
-              disabled={archived || saving}
+              disabled={archived || saving || topicScoped}
               onChange={(event) =>
                 setDraft((current) => ({ ...current, categoryId: event.target.value }))
               }
             >
+              {!categories.some((category) => category.id === item.categoryId) ? <option value={item.categoryId}>{item.categoryName}</option> : null}
               {categories.map((category) => (
                 <option key={category.id} value={category.id}>
                   {category.name}{category.isDefault ? " (Default)" : ""}
@@ -810,31 +829,16 @@ export function TrainingContentEditor({
               ))}
             </select>
           </label>
-          <label className="field-label">
-            Related Focus Topic
-            <select
-              className="text-input"
-              value={draft.focusTopicId}
-              disabled={archived || saving}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, focusTopicId: event.target.value }))
-              }
-            >
-              <option value="">None</option>
-              {!item.focusTopicAvailable && item.focusTopicId ? (
-                <option value={item.focusTopicId}>
-                  {item.focusTopicName ?? "Prior Focus Topic"} (no longer available)
-                </option>
-              ) : null}
-              {focusTopics.map((topic) => (
-                <option key={topic.id} value={topic.id}>{topic.name}</option>
-              ))}
-            </select>
-          </label>
+          <TrainingContentTopicSelector options={focusTopics} existing={item.relatedFocusTopics ?? (item.focusTopicId ? [{
+            id: item.focusTopicId, name: item.focusTopicName ?? "Prior Focus Topic",
+            status: item.focusTopicAvailable ? "active" : "archived", available: item.focusTopicAvailable,
+          }] : [])}
+            selectedIds={draft.focusTopicIds} onChange={(focusTopicIds) => setDraft((current) => ({ ...current, focusTopicIds }))}
+            disabled={archived || saving || topicScoped} error={topicLoadError} onRetry={() => router.refresh()} />
           <TrainingContentScenarioSelector
             options={scenarioOptions}
             selected={relatedScenarios}
-            disabled={archived || saving}
+            disabled={archived || saving || topicScoped}
             onChange={setRelatedScenarios}
           />
         </div>
@@ -876,7 +880,7 @@ export function TrainingContentEditor({
               Markdown
               <textarea
                 className="text-input training-content-native-editor"
-                value={draft.nativeBody}
+                readOnly={topicScoped} value={draft.nativeBody}
                 disabled={archived || saving}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, nativeBody: event.target.value }))
@@ -900,7 +904,7 @@ export function TrainingContentEditor({
                 className="text-input"
                 type="url"
                 inputMode="url"
-                value={draft.externalUrl}
+                readOnly={topicScoped} value={draft.externalUrl}
                 disabled={archived || saving}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, externalUrl: event.target.value }))
@@ -1093,7 +1097,7 @@ export function TrainingContentEditor({
           <input
             type="checkbox"
             checked={assignments.availableToEveryone}
-            disabled={archived || saving}
+            disabled={topicScoped || archived || saving}
             onChange={(event) =>
               setAssignments((current) => ({
                 ...current,
@@ -1112,6 +1116,8 @@ export function TrainingContentEditor({
           </p>
         ) : null}
 
+        <fieldset className="training-content-scoped-fields" disabled={topicScoped}>
+        <legend>Recipient assignments</legend>
         <div className="assignment-columns">
           <div>
             <h3>Specific users</h3>
@@ -1305,6 +1311,7 @@ export function TrainingContentEditor({
             </div>
           </div>
         </div>
+        </fieldset>
       </section>
 
       <div className="training-content-sticky-actions training-content-editor-actions">
@@ -1368,7 +1375,7 @@ export function TrainingContentEditor({
               type="button"
               className="ghost-button danger-button icon-text-button"
               onClick={() => transition("archive")}
-              disabled={saving || uploading}
+              disabled={topicScoped || saving || uploading}
             >
               <Archive size={17} aria-hidden="true" />
               Archive

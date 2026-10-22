@@ -3,7 +3,8 @@
 import { buildScenarioGenerationRequest, generatedScenarioContextMatches } from "./practiceScenarioGenerationContext";
 
 import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle, TriangleAlert } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
   CustomerPracticeScenarioGeneratedDraft,
@@ -129,12 +130,14 @@ function FocusTopicWorkspaceSection({
 
 export function FocusTopicAdministration({
   orgId, initialTopics, users, canManageAllTopics, learningResourcesEnabled,
+  initialTopicId,
 }: {
   orgId: string;
   initialTopics: OrgTrainingSummary[];
   users: DashboardAdminUserRow[];
   canManageAllTopics: boolean;
   learningResourcesEnabled: boolean;
+  initialTopicId?: string;
 }) {
   const [topics, setTopics] = useState<TopicRow[]>(initialTopics);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -178,10 +181,6 @@ export function FocusTopicAdministration({
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [editingContentId, setEditingContentId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState("");
-  const [editingDescription, setEditingDescription] = useState("");
-  const [replacementFile, setReplacementFile] = useState<File | null>(null);
   const [transcriptContentId, setTranscriptContentId] = useState<string | null>(null);
   const [transcriptText, setTranscriptText] = useState("");
   const scenarioGenerationInFlight = useRef(false);
@@ -300,6 +299,14 @@ export function FocusTopicAdministration({
     setPracticeScenarios(scenarioResult); setEditingScenarioId(null);
     void loadAssignableLearners(topic.id);
   });
+
+  const restoredTopic = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialTopicId || restoredTopic.current === `${orgId}:${initialTopicId}`) return;
+    restoredTopic.current = `${orgId}:${initialTopicId}`;
+    const topic = initialTopics.find((entry) => entry.id === initialTopicId);
+    if (topic) selectTopic(topic);
+  }, [orgId, initialTopicId]);
 
   const createTopic = () => void run(async () => {
     const created = await action<TopicRow>({ action: "create_topic", orgId, name, description, status: "draft" });
@@ -454,12 +461,6 @@ export function FocusTopicAdministration({
     setUploadTitle(""); setUploadDescription(""); setUploadFile(null); setUploadProgress(null);
     setMessage("Draft Learning Resource uploaded and attached to this Focus Topic.");
   });
-  const beginEditingContent = (item: DashboardFocusTopicContentItem) => {
-    setEditingContentId(item.id);
-    setEditingTitle(item.title);
-    setEditingDescription(item.description);
-    setReplacementFile(null);
-  };
   const createYouTubeContent = () => void run(async () => {
     if (!selected) return;
     await action<DashboardFocusTopicContentCreateResponse>({
@@ -490,20 +491,6 @@ export function FocusTopicAdministration({
     await action({ action: "remove_content_transcript", orgId, topicId: selected.id, contentId: item.id });
     await refreshRelatedContent(); setTranscriptContentId(null); setTranscriptText("");
     setMessage("Transcript removed. Learner publication is unchanged.");
-  });
-  const saveContent = (item: DashboardFocusTopicContentItem) => void run(async () => {
-    if (!selected) return;
-    await action<DashboardFocusTopicContentMutationResponse>({
-      action: "update_content", orgId, topicId: selected.id, contentId: item.id,
-      expectedUpdatedAt: item.updatedAt, title: editingTitle, description: editingDescription,
-    });
-    if (replacementFile) {
-      setUploadProgress(0);
-      await uploadAsset(item, replacementFile, item.currentAsset?.id ?? null);
-    }
-    await refreshRelatedContent();
-    setEditingContentId(null); setReplacementFile(null); setUploadProgress(null);
-    setMessage("Learning Resource updated.");
   });
   const transitionContent = (
     item: DashboardFocusTopicContentItem,
@@ -1117,25 +1104,11 @@ export function FocusTopicAdministration({
                       onClick={() => { setTranscriptContentId(null); setTranscriptText(""); }}>Close</button>
                   </div> : null}
                 </div> : null}
-              {item && editingContentId === item.id ? <div className="focus-topic-content-editor">
-                <label>Title<input className="text-input" value={editingTitle} maxLength={200}
-                  onChange={(event) => setEditingTitle(event.target.value)} /></label>
-                <label>Description<textarea className="text-input focus-topic-long-textarea" rows={5} value={editingDescription} maxLength={2000}
-                  onChange={(event) => setEditingDescription(event.target.value)} /></label>
-                {item.contentType !== "external_url" ? <label>Replace file (optional)
-                  <input type="file" accept="video/mp4,audio/*,image/*,.pdf,.docx"
-                    onChange={(event) => setReplacementFile(event.target.files?.[0] ?? null)} />
-                </label> : null}
-                {uploadProgress !== null ? <small role="status">Uploading: {uploadProgress}%</small> : null}
-                <div className="focus-topic-actions"><button type="button" className="primary-button compact-button"
-                  disabled={busy || !editingTitle.trim()} onClick={() => saveContent(item)}>Save</button>
-                  <button type="button" className="ghost-button compact-button" disabled={busy}
-                    onClick={() => setEditingContentId(null)}>Cancel</button></div>
-              </div> : null}
             </div>
-            {item?.canMutate && editingContentId !== item.id ? <>
-              <button type="button" className="ghost-button compact-button" disabled={busy}
-                onClick={() => beginEditingContent(item)}>Edit</button>
+            {item?.canMutate ? <>
+              {topicContentEnabled ? <Link className="ghost-button compact-button" aria-label={`Edit ${item.title}`}
+                aria-disabled={busy} tabIndex={busy ? -1 : undefined} onClick={(event) => { if (busy) event.preventDefault(); }}
+                href={`/app/admin/training-content/${encodeURIComponent(item.id)}?orgId=${encodeURIComponent(orgId)}&topicId=${encodeURIComponent(selected.id)}`}>Edit</Link> : null}
               <button type="button" className="ghost-button compact-button" disabled={busy}
                 onClick={() => transitionContent(item, item.publicationState === "published"
                   ? "unpublish_content" : "publish_content")}>

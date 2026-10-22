@@ -70,7 +70,9 @@ test("Related Content uses toggleable authorized attach and upload panels", () =
   assert.match(source, /action: "create_content"/);
   assert.match(source, /action: "initiate_content_upload"/);
   assert.match(source, /action: "finalize_content_upload"/);
-  assert.match(source, /action: "update_content"/);
+  assert.match(source, /href=\{`\/app\/admin\/training-content\/\$\{encodeURIComponent\(item.id\)\}\?orgId=/);
+  assert.match(source, /&topicId=\$\{encodeURIComponent\(selected.id\)\}/);
+  assert.doesNotMatch(source, /const beginEditingContent|const saveContent/);
   assert.match(source, /"publish_content" \| "unpublish_content"/);
   assert.match(source, /item\?\.canMutate/);
   assert.match(source, /item\.mutationRestriction/);
@@ -94,7 +96,7 @@ test("Related Content supports YouTube sources, private transcripts, and eligibi
   assert.match(source, />YouTube URL<\/button>/);
   assert.match(source, /Public YouTube URL/);
   assert.match(source, /Create Draft YouTube Resource/);
-  assert.match(source, /item\.contentType !== "external_url" \? <label>Replace file/);
+  assert.match(source, /aria-label=\{`Edit \$\{item.title\}`\}/);
   assert.match(source, /Generation source:/);
   assert.match(source, /Transcript/);
   assert.match(source, /Not provided/);

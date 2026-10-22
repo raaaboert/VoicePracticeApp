@@ -139,8 +139,10 @@ function ContentRows({
           {item.description ? <p>{item.description}</p> : <p className="muted-copy">No description provided.</p>}
           <dl>
             {showCategory ? <><dt>Content Category</dt><dd>{item.categoryName}</dd></> : null}
-            <dt>Related Focus Topic</dt>
-            <dd>{item.focusTopicName ?? "None"}{!item.focusTopicAvailable ? " (no longer available)" : ""}</dd>
+            <dt>Related Focus Topics</dt>
+            <dd>{item.focusTopicAuthority === "assignments"
+              ? item.relatedFocusTopics?.map((topic) => `${topic.name}${topic.available ? "" : " (unavailable)"}`).join(", ") || "None"
+              : item.focusTopicName ?? "None"}</dd>
             <dt>Availability</dt><dd>{item.assignmentSummary.label}</dd>
             <dt>File</dt><dd>{fileLabel(item)}</dd>
             {item.updatedByDisplayName ? <><dt>Updated by</dt><dd>{item.updatedByDisplayName}</dd></> : null}

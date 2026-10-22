@@ -1291,8 +1291,11 @@ export async function getDashboardTrainingContent(
 
 export async function getDashboardTrainingContentDetail(
   contentId: string,
-  orgId?: string | null
+  orgId?: string | null,
+  topicId?: string | null,
 ): Promise<DashboardTrainingContentDetailResponse> {
+  if (topicId) return requestDashboardScopedTrainingContent<DashboardTrainingContentDetailResponse>(
+    `/dashboard/admin/training-content/${encodeURIComponent(contentId)}`, topicId, orgId);
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardTrainingContentDetailResponse>(
     appendOrgQuery(
@@ -1301,6 +1304,15 @@ export async function getDashboardTrainingContentDetail(
     ),
     { token }
   );
+}
+
+export async function requestDashboardScopedTrainingContent<T>(path: string, topicId: string,
+  orgId?: string | null, options?: { method?: string; body?: unknown }): Promise<T> {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const scoped = appendOrgQuery(path, orgId);
+  return fetchDashboardApi<T>(`${scoped}${scoped.includes("?") ? "&" : "?"}topicId=${encodeURIComponent(topicId)}`, {
+    token, method: options?.method ?? "GET", ...(options?.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
 }
 
 export async function createDashboardTrainingContent(

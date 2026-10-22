@@ -30,6 +30,16 @@ import {
   rejectNonAppDashboardApiHost,
 } from "./dashboardApiProxy";
 
+async function withTopicScope<T>(request: NextRequest, fallback: () => Promise<T>, body?: unknown): Promise<T> {
+  const topicId = request.nextUrl.searchParams.get("topicId")?.trim();
+  if (!topicId) return fallback();
+  const { requestDashboardScopedTrainingContent } = await import("./auth");
+  return requestDashboardScopedTrainingContent<T>(
+    request.nextUrl.pathname.replace(/^\/api\/admin\//, "/dashboard/admin/"),
+    topicId, requestedOrgId(request), { method: request.method, body },
+  );
+}
+
 export interface TrainingContentProxyServices {
   listContent: (options: {
     orgId?: string | null;
@@ -194,7 +204,7 @@ export async function handleTrainingContentDetailGet(
   if (hostResponse) {
     return hostResponse;
   }
-  return handleJson(() => services.getContent(contentId, requestedOrgId(request)));
+  return handleJson(() => withTopicScope(request, () => services.getContent(contentId, requestedOrgId(request))));
 }
 
 export async function handleTrainingContentUpdate(
@@ -209,7 +219,7 @@ export async function handleTrainingContentUpdate(
   try {
     const input = await readDashboardJsonBody(request) as UpdateDashboardTrainingContentRequest;
     return noStore(NextResponse.json(
-      await services.updateContent(contentId, input, requestedOrgId(request))
+      await withTopicScope(request, () => services.updateContent(contentId, input, requestedOrgId(request)), input)
     ));
   } catch (error) {
     return dashboardApiErrorResponse(error);
@@ -249,7 +259,7 @@ export async function handleTrainingContentTransition(
   try {
     const input = await readDashboardJsonBody(request) as DashboardTrainingContentLifecycleRequest;
     return noStore(NextResponse.json(
-      await services.transitionContent(contentId, action, input, requestedOrgId(request))
+      await withTopicScope(request, () => services.transitionContent(contentId, action, input, requestedOrgId(request)), input)
     ));
   } catch (error) {
     return dashboardApiErrorResponse(error);
@@ -430,7 +440,7 @@ export async function handleTrainingContentUploadInitiate(
   try {
     const input = await readDashboardJsonBody(request) as
       DashboardTrainingContentUploadInitiationRequest;
-    const payload = await services.initiateUpload(contentId, input, requestedOrgId(request));
+    const payload = await withTopicScope(request, () => services.initiateUpload(contentId, input, requestedOrgId(request)), input);
     return noStore(NextResponse.json(payload, { status: 201 }));
   } catch (error) {
     return dashboardApiErrorResponse(error);
@@ -448,7 +458,7 @@ export async function handleTrainingContentUploadFinalize(
     return hostResponse;
   }
   return handleJson(() =>
-    services.finalizeUpload(contentId, assetId, requestedOrgId(request))
+    withTopicScope(request, () => services.finalizeUpload(contentId, assetId, requestedOrgId(request)))
   );
 }
 
@@ -463,7 +473,7 @@ export async function handleTrainingContentAssetStatus(
     return hostResponse;
   }
   return handleJson(() =>
-    services.getAssetStatus(contentId, assetId, requestedOrgId(request))
+    withTopicScope(request, () => services.getAssetStatus(contentId, assetId, requestedOrgId(request)))
   );
 }
 
@@ -478,6 +488,6 @@ export async function handleTrainingContentAssetAccess(
     return hostResponse;
   }
   return handleJson(() =>
-    services.getAssetAccess(contentId, assetId, requestedOrgId(request))
+    withTopicScope(request, () => services.getAssetAccess(contentId, assetId, requestedOrgId(request)))
   );
 }

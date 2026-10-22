@@ -406,6 +406,9 @@ export interface DashboardTrainingContentListItem {
   focusTopicId: string | null;
   focusTopicName: string | null;
   focusTopicAvailable: boolean;
+  /** Authoritative direct attachments; legacy scalar fields cannot represent multiple Topics. */
+  relatedFocusTopics?: Array<DashboardTrainingContentFocusTopic & { available: boolean }>;
+  focusTopicAuthority?: "legacy" | "assignments";
   contentType: TrainingContentType;
   externalKind?: TrainingContentExternalKind | null;
   publicationState: TrainingContentPublicationState;
@@ -482,7 +485,9 @@ export interface CreateDashboardTrainingContentRequest {
   categoryId?: string | null;
   title: string;
   description?: string;
+  /** Legacy single-selection input; new clients use focusTopicIds. */
   focusTopicId?: string | null;
+  focusTopicIds?: string[];
   nativeBody?: string | null;
   externalUrl?: string | null;
   externalKind?: TrainingContentExternalKind | null;
@@ -494,7 +499,10 @@ export interface UpdateDashboardTrainingContentRequest {
   categoryId?: string;
   title?: string;
   description?: string;
+  /** Legacy input adds a Topic in assignments mode; null never erases direct attachments. */
   focusTopicId?: string | null;
+  focusTopicIds?: string[];
+  expectedFocusTopicIds?: string[];
   nativeBody?: string | null;
   externalUrl?: string | null;
   externalKind?: TrainingContentExternalKind | null;

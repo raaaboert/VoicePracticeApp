@@ -87,7 +87,7 @@ test("Training Content editor guards destructive actions, conflicts, and duplica
 test("Training Content forms separate categories from optional Focus Topics and hide raw order", () => {
   for (const source of [createSource, editorSource]) {
     assert.equal(source.includes("Content Category"), true);
-    assert.equal(source.includes("Related Focus Topic"), true);
+    assert.equal(source.includes("<TrainingContentTopicSelector"), true);
     assert.equal(source.includes("Display order"), false);
     assert.equal(source.includes("beforeunload"), true);
     assert.equal(source.includes("<UnsavedChangesDialog"), true);

@@ -24,7 +24,10 @@ export default async function NewTrainingContentPage({
   let scenarioOptions;
   try {
     [topics, categories, scenarioOptions] = await Promise.all([
-      getDashboardTrainingContentFocusTopics(orgId),
+      getDashboardTrainingContentFocusTopics(orgId).catch((error) => {
+        if (error instanceof DashboardSessionInvalidError || (error instanceof DashboardApiError && error.status < 500)) throw error;
+        return null;
+      }),
       getDashboardTrainingContentCategories(orgId),
       getDashboardTrainingContentScenarioOptions(orgId),
     ]);
@@ -46,13 +49,15 @@ export default async function NewTrainingContentPage({
       <PageHeader
         eyebrow="Learning Resources"
         title="New Learning Resource"
-        description={`Create a draft for ${topics.org.name}.`}
+        description={`Create a draft for ${categories.org.name}.`}
       />
       <TrainingContentAdminNav orgId={orgId} active="training-content" />
       <TrainingContentCreateForm
+        key={categories.org.id}
         orgId={orgId}
         categories={categories.categories}
-        focusTopics={topics.focusTopics}
+        focusTopics={topics?.focusTopics ?? []}
+        topicLoadError={!topics ? "Could not load Focus Topics. Retry to choose Topics, or create an unattached resource." : undefined}
         scenarioOptions={scenarioOptions.scenarios}
       />
     </>

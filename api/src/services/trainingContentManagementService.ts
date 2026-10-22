@@ -223,6 +223,7 @@ export interface TrainingContentManagementService {
 }
 
 interface TrainingContentManagementServiceParams {
+  focusTopicAuthority?: "legacy" | "assignments";
   store: TrainingContentStore;
   categoryStore: TrainingContentCategoryStore;
   entitlementStore: OrgModuleEntitlementStore;
@@ -257,10 +258,13 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       params.context.orgId,
       filters
     );
+    const attachments = this.dependencies.focusTopicAuthority === "assignments"
+      ? await this.dependencies.store.listTopicAttachmentsForContents(params.context.orgId, result.items.map((row) => row.content.id)) : [];
     return {
       ...result,
       items: result.items.map((row) =>
-        mapListItem(row, params.context.orgId, params.references)
+        this.withTopicRelationships(mapListItem(row, params.context.orgId, params.references),
+          params.references, attachments.filter((entry) => entry.contentId === row.content.id).map((entry) => entry.topicId))
       ),
     };
   }
@@ -295,6 +299,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       "title",
       "description",
       "focusTopicId",
+      "focusTopicIds",
       "nativeBody",
       "externalUrl",
       "externalKind",
@@ -321,10 +326,13 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         params.input.categoryId
       );
     const contentType = normalizeContentType(params.input.contentType);
+    const topicIds = params.input.focusTopicIds === undefined ? undefined : normalizeTopicIds(params.input.focusTopicIds);
+    if (topicIds !== undefined && params.input.focusTopicId !== undefined) throw validationError("Send focusTopicIds or the legacy focusTopicId, not both.");
+    if (this.dependencies.focusTopicAuthority !== "assignments" && topicIds && topicIds.length > 1) throw validationError("Multiple Focus Topics require assignments authority.");
     const focusTopic = resolveFocusTopic(
       params.references,
       params.context.orgId,
-      params.input.focusTopicId
+      topicIds?.[0] ?? params.input.focusTopicId
     );
     const nativeBody = normalizeNativeBodyForType(params.input.nativeBody, contentType);
     const externalKind = normalizeExternalKindForType(params.input.externalKind, contentType);
@@ -346,7 +354,11 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       now: params.now,
     };
     let detail: TrainingContentManagementDetail;
-    if (params.attachSelectedTopic && focusTopic) {
+    if (params.attachSelectedTopic && topicIds !== undefined) {
+      if (!params.context.transactionGuard) throw new Error("Direct Topic content creation requires a transaction guard.");
+      detail = await this.dependencies.store.createContent({ ...creation, focusTopicId: null, focusTopicNameSnapshot: null,
+        topicIds, transactionGuard: params.context.transactionGuard });
+    } else if (params.attachSelectedTopic && focusTopic) {
       if (!params.context.transactionGuard) {
         throw new Error("Direct Topic content creation requires a transaction guard.");
       }
@@ -382,12 +394,18 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     now?: Date;
   }): Promise<DashboardTrainingContentDetail> {
     await this.authorize(params.context);
+    if (params.context.authorityScope === "focus_topic"
+      && Object.keys(params.input).some((key) => !["expectedUpdatedAt", "title", "description"].includes(key))) {
+      throw new TrainingContentManagementServiceError("These fields require Organization Admin access.", 403, "dashboard_scope_denied");
+    }
     assertOnlyFields(params.input, [
       "expectedUpdatedAt",
       "categoryId",
       "title",
       "description",
       "focusTopicId",
+      "focusTopicIds",
+      "expectedFocusTopicIds",
       "nativeBody",
       "externalUrl",
       "externalKind",
@@ -417,12 +435,18 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         preservedExistingScenarioIds: existingScenarioIds,
       });
 
-    const focusTopic = params.input.focusTopicId === undefined
+    const topicIds = params.input.focusTopicIds === undefined ? undefined : normalizeTopicIds(params.input.focusTopicIds);
+    if (topicIds !== undefined && params.input.focusTopicId !== undefined) throw validationError("Send focusTopicIds or the legacy focusTopicId, not both.");
+    const direct = this.dependencies.focusTopicAuthority === "assignments";
+    const expectedTopicIds = params.input.expectedFocusTopicIds === undefined ? undefined : normalizeTopicIds(params.input.expectedFocusTopicIds);
+    if (direct && topicIds && expectedTopicIds === undefined) throw validationError("Reload the resource before changing Focus Topics.");
+    if (!direct && topicIds && topicIds.length > 1) throw validationError("Multiple Focus Topics require assignments authority.");
+    const focusTopic = params.input.focusTopicId === undefined && (direct || topicIds === undefined)
       ? undefined
       : resolveFocusTopic(
         params.references,
         params.context.orgId,
-        params.input.focusTopicId
+        topicIds?.[0] ?? params.input.focusTopicId
       );
     const categoryId = params.input.categoryId === undefined
       ? undefined
@@ -436,6 +460,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       params.input.title,
       params.input.description,
       params.input.focusTopicId,
+      params.input.focusTopicIds,
       params.input.nativeBody,
       params.input.externalUrl,
       params.input.externalKind,
@@ -471,10 +496,14 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         description: params.input.description === undefined
           ? undefined
           : normalizeDescription(params.input.description),
-        focusTopicId: params.input.focusTopicId === undefined ? undefined : focusTopic?.id ?? null,
-        focusTopicNameSnapshot: params.input.focusTopicId === undefined
+        focusTopicId: params.input.focusTopicId === undefined && (direct || topicIds === undefined) ? undefined : focusTopic?.id ?? null,
+        focusTopicNameSnapshot: params.input.focusTopicId === undefined && (direct || topicIds === undefined)
           ? undefined
           : focusTopic?.name ?? null,
+        topicIds: direct ? topicIds ?? (params.input.focusTopicId ? [focusTopic!.id] : undefined) : undefined,
+        expectedTopicIds: direct ? expectedTopicIds : undefined,
+        // Older clients may add their single Topic, but cannot erase other direct attachments.
+        addTopicsOnly: direct && topicIds === undefined,
         nativeBody: params.input.nativeBody === undefined
           ? undefined
           : normalizeNativeBodyForType(params.input.nativeBody, current.content.contentType),
@@ -579,7 +608,8 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     if (!current) {
       throw notFoundError();
     }
-    if (current.content.publicationState === "published") {
+    if (current.content.publicationState === "published"
+      && !await this.hasActiveTopicTarget(params.context.orgId, current.content.id, params.references)) {
       assertHasEffectiveAssignment(
         assignments.map((assignment) => ({ ...assignment, revokedAt: null })),
         params.context.orgId,
@@ -615,11 +645,9 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       if (!current) {
         throw notFoundError();
       }
-      assertHasEffectiveAssignment(
-        current.assignments,
-        params.context.orgId,
-        params.references
-      );
+      if (!await this.hasActiveTopicTarget(params.context.orgId, current.content.id, params.references)) {
+        assertHasEffectiveAssignment(current.assignments, params.context.orgId, params.references);
+      }
     }
     const detail = await this.dependencies.store.transitionContent({
       orgId: params.context.orgId,
@@ -898,6 +926,13 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     return category;
   }
 
+  private async hasActiveTopicTarget(orgId: string, contentId: string, references: TrainingContentReferenceData): Promise<boolean> {
+    if (this.dependencies.focusTopicAuthority !== "assignments") return false;
+    const attachments = await this.dependencies.store.listTopicAttachmentsForContents(orgId, [contentId]);
+    return attachments.some((attachment) => references.focusTopics.some((topic) =>
+      topic.orgId === orgId && topic.id === attachment.topicId && topic.status === "active"));
+  }
+
   private async mapDetail(
     detail: TrainingContentManagementDetail,
     orgId: string,
@@ -915,7 +950,23 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
         title: scenario.title,
         available: scenario.available,
       }));
-    return mapDetail(detail, orgId, references, relatedScenarios);
+    const mapped = mapDetail(detail, orgId, references, relatedScenarios);
+    const attachments = this.dependencies.focusTopicAuthority === "assignments"
+      ? await this.dependencies.store.listTopicAttachmentsForContents(orgId, [detail.content.id]) : [];
+    return this.withTopicRelationships(mapped, references, attachments.map((entry) => entry.topicId));
+  }
+
+  private withTopicRelationships<T extends DashboardTrainingContentListItem>(item: T, references: TrainingContentReferenceData, ids: string[]): T {
+    if (this.dependencies.focusTopicAuthority !== "assignments") return { ...item, focusTopicAuthority: "legacy" };
+    const relatedFocusTopics = ids.map((id) => {
+      const topic = references.focusTopics.find((entry) => entry.id === id && entry.orgId === references.scenarioOrg.id);
+      return { id, name: topic?.name ?? "Unavailable Focus Topic", status: topic?.status ?? "archived" as const,
+        available: topic?.status === "active" };
+    }).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+    const single = relatedFocusTopics.length === 1 ? relatedFocusTopics[0] : null;
+    return { ...item, relatedFocusTopics, focusTopicAuthority: "assignments",
+      focusTopicId: single?.id ?? null, focusTopicName: single?.name ?? null,
+      focusTopicAvailable: single?.available ?? true };
   }
 
   private async authorize(context: TrainingContentManagementRequestContext): Promise<void> {
@@ -1288,6 +1339,11 @@ function assertHasEffectiveAssignment(
       { reasons: ["assignment_required"] }
     );
   }
+}
+
+function normalizeTopicIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 200) throw validationError("Select up to 200 Focus Topics.");
+  return [...new Set(value.map((id) => requiredString(id, "Focus Topic id", 200)))];
 }
 
 function resolveFocusTopic(

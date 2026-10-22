@@ -840,6 +840,7 @@ const trainingContentScenarioLinkService = createTrainingContentScenarioLinkServ
   trainingContentStore
 );
 const defaultTrainingContentManagementService = createTrainingContentManagementService({
+  focusTopicAuthority: runtimeConfig.focusTopicAuthority,
   store: trainingContentStore,
   categoryStore: trainingContentCategoryStore,
   entitlementStore: orgModuleEntitlementStore,
@@ -9526,6 +9527,35 @@ async function resolveTrainingContentManagementResources(
   request: DashboardAuthRequest,
   response: Response
 ): Promise<ResolvedTrainingContentManagementResources | null> {
+  const topicId = getSingleQueryParam(request.query.topicId);
+  if (topicId && !request.dashboard!.viewer.capabilities.manageOrganizationContent
+    && request.dashboard!.viewer.accessType !== "super_user") {
+    const base = "/dashboard/admin/training-content/:contentId";
+    const path = request.route.path as string;
+    const allowed = (request.method === "GET" && [base, `${base}/assets/:assetId`, `${base}/assets/:assetId/access`, `${base}/transcript`].includes(path))
+      || (request.method === "PATCH" && path === base)
+      || (request.method === "POST" && [`${base}/publish`, `${base}/unpublish`, `${base}/assets/uploads`, `${base}/assets/:assetId/finalize`].includes(path))
+      || (["PUT", "DELETE"].includes(request.method) && path === `${base}/transcript`);
+    if (!allowed || !request.params.contentId) {
+      response.status(403).json({ error: "This action requires Organization Admin access.", code: "dashboard_scope_denied" });
+      return null;
+    }
+    try {
+      const resources = await resolveTopicScopedContentRouteResources(request, response, request.params.contentId, {
+        orgId: getSingleQueryParam(request.query.orgId) || request.dashboard!.user.orgId || "",
+        topicId,
+      });
+      if (!resources) return null;
+      await getOrCreateDatabaseStorage().runTransaction(async (client) => {
+        if (!client) throw new Error("Topic content management requires PostgreSQL.");
+        await resources.context.transactionGuard!(client);
+      });
+      return resources;
+    } catch (error) {
+      respondWithFocusTopicScopedContentError(error, response);
+      return null;
+    }
+  }
   return withFreshDatabaseRead(async (db) => {
     const adminContext = resolveDashboardAdminOrgContext(
       db,
@@ -9542,6 +9572,8 @@ async function resolveTrainingContentManagementResources(
         actorId: request.dashboard!.user.id,
         capabilities: adminContext.capabilities,
         actorType: "web_user",
+        transactionGuard: createCentralContentTransactionGuard({ orgId: adminContext.org.id,
+          actorId: request.dashboard!.user.id }),
       },
       references: {
         users: db.users.filter(
@@ -14415,7 +14447,7 @@ app.patch(
         fileLimitsBytes: trainingContentManagementService.getFileLimits(),
       });
     } catch (error) {
-      respondWithTrainingContentManagementError(error, response);
+      respondWithFocusTopicScopedContentError(error, response);
     }
   }
 );
@@ -19399,6 +19431,7 @@ async function resolveTopicScopedContentRouteResources(
   request: ContentOrganizationAuthRequest,
   response: Response,
   contentId?: string,
+  selection?: { orgId: string; topicId: string },
 ): Promise<ResolvedTrainingContentManagementResources | null> {
   if (runtimeConfig.focusTopicAuthority !== "assignments") {
     response.status(409).json({
@@ -19416,10 +19449,10 @@ async function resolveTopicScopedContentRouteResources(
   }
   return withFreshDatabaseRead(async (db) => {
     const management = await resolveFocusTopicManagementContext(
-      db, request, request.params.orgId, response, request.params.trainingId,
+      db, request, selection?.orgId ?? request.params.orgId, response, selection?.topicId ?? request.params.trainingId,
     );
     if (!management) return null;
-    const topic = findOrgTrainingRecord(db, management.org.id, request.params.trainingId);
+    const topic = findOrgTrainingRecord(db, management.org.id, selection?.topicId ?? request.params.trainingId);
     if (!topic || topic.status !== "active") {
       response.status(404).json({ error: "Focus Topic not found." });
       return null;

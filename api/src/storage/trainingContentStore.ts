@@ -154,6 +154,8 @@ export interface CreateTrainingContentInput {
   externalKind?: TrainingContentExternalKind | null;
   actor: TrainingContentMutationActor;
   now?: Date;
+  topicIds?: string[];
+  transactionGuard?: TrainingContentTransactionGuard;
 }
 
 export type TrainingContentTransactionGuard = (
@@ -174,6 +176,9 @@ export interface UpdateTrainingContentInput {
   title?: string;
   description?: string;
   focusTopicId?: string | null;
+  topicIds?: string[];
+  expectedTopicIds?: string[];
+  addTopicsOnly?: boolean;
   focusTopicNameSnapshot?: string | null;
   nativeBody?: string | null;
   externalUrl?: string | null;
@@ -226,6 +231,7 @@ export interface TransitionTrainingContentInput {
 }
 
 export interface TrainingContentStore {
+  listTopicAttachmentsForContents(orgId: string, contentIds: string[]): Promise<Array<{ contentId: string; topicId: string }>>;
   initialize(): Promise<void>;
   listContentItemsForOrg(orgId: string): Promise<TrainingContentItem[]>;
   listContentAuthorityForOrg(orgId: string): Promise<TrainingContentAuthorityRecord[]>;
@@ -514,6 +520,7 @@ const SCENARIO_LINK_COLUMNS = `
 `;
 
 class NullTrainingContentStore implements TrainingContentStore {
+  async listTopicAttachmentsForContents(): Promise<Array<{ contentId: string; topicId: string }>> { return []; }
   async initialize(): Promise<void> {
     // Training Content is relational and unavailable for non-postgres providers.
   }
@@ -1006,7 +1013,14 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         STRPOS(LOWER(c.title), LOWER(${parameter})) > 0
         OR STRPOS(LOWER(c.description), LOWER(${parameter})) > 0
         OR STRPOS(LOWER(category.name), LOWER(${parameter})) > 0
-        OR STRPOS(LOWER(COALESCE(c.focus_topic_name_snapshot, '')), LOWER(${parameter})) > 0
+        OR ${this.focusTopicAuthority === "assignments" ? `EXISTS (
+          SELECT 1 FROM org_content_topic_attachments a
+          JOIN app_state state ON state.id='primary'
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(state.state_json->'orgTrainings','[]'::jsonb)) topic
+          WHERE a.org_id=c.org_id AND a.content_id=c.id AND a.detached_at IS NULL
+            AND topic->>'orgId'=a.org_id AND topic->>'id'=a.topic_id
+            AND STRPOS(LOWER(topic->>'name'), LOWER(${parameter})) > 0
+        )` : `STRPOS(LOWER(COALESCE(c.focus_topic_name_snapshot, '')), LOWER(${parameter})) > 0`}
       )`);
     }
     if (filters.categoryId?.trim()) {
@@ -1015,7 +1029,10 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     }
     if (filters.focusTopicId?.trim()) {
       values.push(filters.focusTopicId.trim());
-      conditions.push(`c.focus_topic_id = $${values.length}`);
+      conditions.push(this.focusTopicAuthority === "assignments"
+        ? `EXISTS (SELECT 1 FROM org_content_topic_attachments a WHERE a.org_id=c.org_id
+            AND a.content_id=c.id AND a.topic_id=$${values.length} AND a.detached_at IS NULL)`
+        : `c.focus_topic_id = $${values.length}`);
     }
     if (filters.contentType) {
       values.push(filters.contentType);
@@ -1146,6 +1163,17 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     return readContentDetail(this.pool, orgId, contentId);
   }
 
+  async listTopicAttachmentsForContents(orgId: string, contentIds: string[]): Promise<Array<{ contentId: string; topicId: string }>> {
+    await this.initialize();
+    if (this.focusTopicAuthority !== "assignments" || contentIds.length === 0) return [];
+    const result = await this.pool.query<{ content_id: string; topic_id: string }>(
+      `SELECT content_id,topic_id FROM org_content_topic_attachments
+       WHERE org_id=$1 AND content_id=ANY($2::uuid[]) AND detached_at IS NULL ORDER BY topic_id`,
+      [orgId, contentIds],
+    );
+    return result.rows.map((row) => ({ contentId: row.content_id, topicId: row.topic_id }));
+  }
+
   async createContent(input: CreateTrainingContentInput): Promise<TrainingContentManagementDetail> {
     await this.initialize();
     const client = await this.pool.connect();
@@ -1153,6 +1181,12 @@ class PostgresTrainingContentStore implements TrainingContentStore {
     const contentId = randomUUID();
     try {
       await client.query("BEGIN");
+      if (input.topicIds !== undefined) {
+        if (this.focusTopicAuthority !== "assignments" || !input.transactionGuard) {
+          throw new TrainingContentStoreError("Direct Topic creation is unavailable.", "training_content_invalid");
+        }
+        await input.transactionGuard(client);
+      }
       const category = await lockActiveCategory(client, input.orgId, input.categoryId);
       const orderResult = await client.query<{ max_order: string | number | null }>(
         `
@@ -1209,6 +1243,10 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         ]
       );
       const content = mapRequiredContentRow(inserted.rows[0]);
+      if (input.topicIds !== undefined) {
+        await replaceContentTopicAttachments(client, { orgId: content.orgId, contentId: content.id,
+          topicIds: input.topicIds, actorId: input.actor.actorId, now });
+      }
       await insertAuditEvent(client, {
         actor: input.actor,
         action: "training_content_created",
@@ -1324,6 +1362,9 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         ? await lockActiveCategory(client, input.orgId, input.categoryId)
         : null;
       const current = await lockContent(client, input.orgId, input.contentId);
+      if (input.topicIds !== undefined && (this.focusTopicAuthority !== "assignments" || !input.transactionGuard)) {
+        throw new TrainingContentStoreError("Direct Topic editing is unavailable.", "training_content_invalid");
+      }
       if (input.transactionGuard) await input.transactionGuard(client);
       assertExpectedUpdatedAt(current, input.expectedUpdatedAt);
       if (current.publicationState === "archived") {
@@ -1345,6 +1386,12 @@ class PostgresTrainingContentStore implements TrainingContentStore {
         externalUrl: input.externalUrl === undefined ? current.externalUrl : input.externalUrl,
         externalKind: input.externalKind === undefined ? (current.externalKind ?? null) : input.externalKind,
       };
+      const topicsChanged = input.topicIds !== undefined
+        ? await replaceContentTopicAttachments(client, {
+          orgId: current.orgId, contentId: current.id, topicIds: input.topicIds,
+          expectedTopicIds: input.expectedTopicIds, addOnly: input.addTopicsOnly,
+          actorId: input.actor.actorId, now: input.now ?? new Date(),
+        }) : false;
       const categoryChanged = next.categoryId !== current.categoryId;
       let nextDisplayOrder = current.displayOrder;
       if (categoryChanged) {
@@ -1361,6 +1408,7 @@ class PostgresTrainingContentStore implements TrainingContentStore {
           + 1;
       }
       const changedFields = [
+        topicsChanged ? "focusTopics" : null,
         categoryChanged ? "category" : null,
         next.title !== current.title ? "title" : null,
         next.description !== current.description ? "description" : null,
@@ -1746,6 +1794,48 @@ async function lockActiveCategory(
     );
   }
   return { id: row.id, orgId: row.org_id };
+}
+
+/** Relationship edits share the same content lock as workspace attach/detach.
+ * Ineligible existing relationships are retained, never silently removed by a picker. */
+async function replaceContentTopicAttachments(client: Pick<PoolClient, "query">, input: {
+  orgId: string; contentId: string; topicIds: string[]; expectedTopicIds?: string[];
+  addOnly?: boolean; actorId: string; now: Date;
+}): Promise<boolean> {
+  const state = await client.query<{ state_json: { orgTrainings?: Array<{ id: string; orgId: string; status: string }> } }>(
+    "SELECT state_json FROM app_state WHERE id='primary' FOR SHARE",
+  );
+  const activeTopics = new Set((state.rows[0]?.state_json.orgTrainings ?? [])
+    .filter((topic) => topic.orgId === input.orgId && topic.status === "active").map((topic) => topic.id));
+  const rows = await client.query<{ id: string; topic_id: string }>(
+    `SELECT id,topic_id FROM org_content_topic_attachments
+     WHERE org_id=$1 AND content_id=$2 AND detached_at IS NULL FOR UPDATE`, [input.orgId, input.contentId],
+  );
+  const current = new Set(rows.rows.map((row) => row.topic_id));
+  if (input.expectedTopicIds && JSON.stringify([...current].sort()) !== JSON.stringify([...new Set(input.expectedTopicIds)].sort())) {
+    throw new TrainingContentStoreError("Focus Topic relationships changed. Reload before saving.", "training_content_conflict");
+  }
+  const desired = new Set(input.topicIds);
+  for (const id of desired) {
+    if (!current.has(id) && !activeTopics.has(id)) {
+      throw new TrainingContentStoreError("Only current Active Focus Topics in this organization can receive content. Change Draft Topics to Active and save first.", "training_content_invalid");
+    }
+  }
+  for (const id of current) if (input.addOnly || !activeTopics.has(id)) desired.add(id);
+  const removed = rows.rows.filter((row) => !desired.has(row.topic_id)).map((row) => row.id);
+  if (removed.length > 0) await client.query(
+    `UPDATE org_content_topic_attachments SET detached_at=$3,detached_by=$4
+     WHERE org_id=$1 AND id=ANY($2::text[]) AND detached_at IS NULL`,
+    [input.orgId, removed, input.now, input.actorId],
+  );
+  const added = [...desired].filter((id) => !current.has(id));
+  for (const id of added) await client.query(
+    `INSERT INTO org_content_topic_attachments
+     (id,org_id,content_id,topic_id,attached_by,attached_at,detached_by,detached_at)
+     VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL)`,
+    [`ftca_${randomUUID()}`, input.orgId, input.contentId, id, input.actorId, input.now],
+  );
+  return removed.length > 0 || added.length > 0;
 }
 
 async function readContentDetail(

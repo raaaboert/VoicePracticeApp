@@ -13,9 +13,10 @@ import {
 import { buildDashboardSessionResetPath } from "@/src/lib/dashboardSession";
 
 export default async function FocusTopicAdminPage({ searchParams }: {
-  searchParams: Promise<{ orgId?: string }>;
+  searchParams: Promise<{ orgId?: string; topicId?: string }>;
 }) {
-  const selectedOrgId = (await searchParams).orgId?.trim() || null;
+  const query = await searchParams;
+  const selectedOrgId = query.orgId?.trim() || null;
   try {
     const viewer = await getDashboardViewer();
     if (!viewer || !viewer.capabilities.manageFocusTopics) redirect("/app/access-denied");
@@ -34,7 +35,7 @@ export default async function FocusTopicAdminPage({ searchParams }: {
       <PageHeader eyebrow="Admin" title="Focus Topics"
         description={`Manage Focus Topic access and related learning resources for ${usersPayload?.org.name ?? viewer.orgName}.`} />
       <TrainingContentAdminNav orgId={selectedOrgId} active="focus-topics" capabilities={viewer.capabilities} />
-      <FocusTopicAdministration orgId={orgId}
+      <FocusTopicAdministration key={orgId} orgId={orgId} initialTopicId={query.topicId?.trim()}
         initialTopics={topics.trainings} users={usersPayload?.users ?? []}
         canManageAllTopics={topics.management.canManageAllTopics}
         learningResourcesEnabled={topics.management.learningResourcesEnabled} />

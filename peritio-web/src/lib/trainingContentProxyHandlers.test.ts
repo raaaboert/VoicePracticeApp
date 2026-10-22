@@ -154,6 +154,26 @@ test("Training Content list proxy forwards bounded filters and explicit organiza
   });
 });
 
+test("resource create and update proxies preserve multiple Topic selections and the expected relationship snapshot", async () => {
+  const focusTopicIds = ["topic_b", "topic_a"];
+  const expectedFocusTopicIds = ["topic_a"];
+  const calls: unknown[] = [];
+  const created = await handleTrainingContentCreate(request("/api/admin/training-content?orgId=org_1", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "Multiple Topics", contentType: "native", focusTopicIds }),
+  }), { createContent: async (input, orgId) => { calls.push({ input, orgId }); return detailResponse(); } });
+  assert.equal(created.status, 201);
+  const updated = await handleTrainingContentUpdate(request("/api/admin/training-content/content_1?orgId=org_1", {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedUpdatedAt: NOW, focusTopicIds, expectedFocusTopicIds }),
+  }), "content_1", { updateContent: async (id, input, orgId) => { calls.push({ id, input, orgId }); return detailResponse(); } });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(calls, [
+    { orgId: "org_1", input: { title: "Multiple Topics", contentType: "native", focusTopicIds } },
+    { id: "content_1", orgId: "org_1", input: { expectedUpdatedAt: NOW, focusTopicIds, expectedFocusTopicIds } },
+  ]);
+});
+
 test("Training Content category and ordering proxies forward bodies and explicit organization context", async () => {
   const calls: unknown[] = [];
   const category = {

@@ -834,6 +834,149 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
           await storage.save(before);
         }
       });
+      await t.test("resource editor and Topic workspace share durable many-to-many attachments with scoped authority", async () => {
+        const before = structuredClone(await storage.load());
+        const first = { ...topic, id: "multi_alpha", name: "alpha" };
+        const second = { ...topic, id: "multi_bravo", name: "Bravo" };
+        const draft = { ...topic, id: "multi_draft", name: "Draft", status: "draft" as const };
+        await storage.save({ ...before, orgTrainings: [...before.orgTrainings, first, second, draft] });
+        const createdIds: string[] = [];
+        const create = async (ids: string[]) => {
+          const result = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+            contentType: "native", title: "Multi Topic resource", description: "", nativeBody: "# Learning",
+            focusTopicIds: ids,
+          });
+          assert.equal(result.status, 201, JSON.stringify(result.body));
+          const item = result.body.item as Record<string, any>;
+          createdIds.push(item.id);
+          return item;
+        };
+        const detailPath = (id: string) => `/dashboard/admin/training-content/${id}`;
+        const detail = async (id: string) => {
+          const result = await orgAdminCall(detailPath(id));
+          assert.equal(result.status, 200, JSON.stringify(result.body));
+          return result.body.item as Record<string, any>;
+        };
+        const ids = (item: Record<string, any>) => (item.relatedFocusTopics as Array<{ id: string }>).map((entry) => entry.id).sort();
+        const change = async (item: Record<string, any>, selected: string[], extra: Record<string, unknown> = {}) =>
+          orgAdminCall(detailPath(item.id), "PATCH", { expectedUpdatedAt: item.updatedAt,
+            focusTopicIds: selected, expectedFocusTopicIds: ids(item), ...extra });
+        try {
+          let one = await create([first.id]);
+          assert.deepEqual(ids(one), [first.id]);
+          const multiple = await create([second.id, first.id]);
+          assert.deepEqual(ids(multiple), [first.id, second.id]);
+          const invalidCreate = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+            contentType: "native", title: "Invalid multi creation", nativeBody: "Material", focusTopicIds: [first.id, draft.id],
+          });
+          assert.equal(invalidCreate.status, 409, JSON.stringify(invalidCreate.body));
+          assert.equal((await pool!.query("SELECT 1 FROM org_content_items WHERE title='Invalid multi creation'")).rowCount, 0);
+          assert.equal(multiple.focusTopicId, null); // Compatibility scalar cannot misrepresent a multi-selection.
+          assert.equal((await pool!.query("SELECT focus_topic_id FROM org_content_items WHERE id=$1", [multiple.id])).rows[0].focus_topic_id, null);
+          let changed = await change(one, [first.id, second.id]);
+          assert.equal(changed.status, 200, JSON.stringify(changed.body));
+          one = changed.body.item as Record<string, any>;
+          assert.deepEqual(ids(one), [first.id, second.id]);
+          changed = await change(one, [second.id]);
+          assert.equal(changed.status, 200, JSON.stringify(changed.body));
+          one = changed.body.item as Record<string, any>;
+          assert.deepEqual(ids(one), [second.id]);
+          const history = await pool!.query("SELECT topic_id,detached_at FROM org_content_topic_attachments WHERE content_id=$1 ORDER BY topic_id", [one.id]);
+          assert.deepEqual(history.rows.map((row) => [row.topic_id, Boolean(row.detached_at)]), [[first.id, true], [second.id, false]]);
+          for (const current of [first, second]) {
+            const read = await orgAdminCall(`/orgs/${org.id}/trainings/${current.id}/direct-attachments`);
+            assert.equal(read.status, 200);
+            assert.equal((read.body.content as Array<{ contentId: string; detachedAt: string | null }>)
+              .some((row) => row.contentId === one.id && row.detachedAt === null), current.id === second.id);
+          }
+          const standalone = await create([]);
+          const workspacePath = `/orgs/${org.id}/trainings/${first.id}/direct-attachments`;
+          assert.equal((await orgAdminCall(workspacePath, "POST", { kind: "content", contentId: standalone.id })).status, 201);
+          assert.deepEqual(ids(await detail(standalone.id)), [first.id]);
+          assert.deepEqual(ids(await detail(one.id)), [second.id]);
+          const freshSession = scopedWebAuth.issueSession(orgAdmin, 60, new Date(), { accessType: "customer_dashboard_user", orgId: org.id });
+          await scopedWebAuthStore.saveSession(freshSession.record);
+          const freshRead = await dashboardCall(freshSession.token, detailPath(multiple.id));
+          assert.equal(freshRead.status, 200);
+          assert.deepEqual(ids(freshRead.body.item as Record<string, any>), [first.id, second.id]);
+          const filtered = await orgAdminCall(`/dashboard/admin/training-content?focusTopicId=${second.id}&q=bravo`);
+          assert.equal(filtered.status, 200, JSON.stringify(filtered.body));
+          assert.ok((filtered.body.items as Array<{ id: string }>).some((row) => row.id === multiple.id));
+
+          const deniedDraft = await change(one, [second.id, draft.id], { title: "Must not persist" });
+          assert.equal(deniedDraft.status, 409, JSON.stringify(deniedDraft.body));
+          assert.equal(deniedDraft.body.code, "training_content_invalid");
+          assert.notEqual((await detail(one.id)).title, "Must not persist");
+          assert.deepEqual(ids(await detail(one.id)), [second.id]);
+          const deniedForeign = await change(one, [second.id, foreignTopic.id]);
+          assert.equal(deniedForeign.status, 409, JSON.stringify(deniedForeign.body));
+          const state = structuredClone(await storage.load());
+          state.orgTrainings.find((row) => row.id === second.id)!.status = "draft";
+          await storage.save(state);
+          const protectedRead = await detail(one.id);
+          assert.equal(protectedRead.relatedFocusTopics[0].available, false);
+          assert.equal((await change(protectedRead, [])).status, 200);
+          assert.deepEqual(ids(await detail(one.id)), [second.id]); // Omitted unavailable selection is never detached.
+          state.orgTrainings.find((row) => row.id === second.id)!.status = "active";
+          await storage.save(state);
+
+          const stale = await detail(one.id);
+          assert.equal((await orgAdminCall(workspacePath, "POST", { kind: "content", contentId: one.id })).status, 201);
+          assert.equal((await change(stale, [])).status, 409);
+          assert.deepEqual(ids(await detail(one.id)), [first.id, second.id]);
+          const oldClient = await orgAdminCall(detailPath(one.id), "PATCH", {
+            expectedUpdatedAt: stale.updatedAt, focusTopicId: second.id,
+          });
+          assert.equal(oldClient.status, 200, JSON.stringify(oldClient.body));
+          assert.deepEqual(ids(oldClient.body.item as Record<string, any>), [first.id, second.id]);
+          const oldClear = await orgAdminCall(detailPath(one.id), "PATCH", {
+            expectedUpdatedAt: (oldClient.body.item as any).updatedAt, focusTopicId: null,
+          });
+          assert.equal(oldClear.status, 200, JSON.stringify(oldClear.body));
+          assert.deepEqual(ids(oldClear.body.item as Record<string, any>), [first.id, second.id]);
+
+          const published = await orgAdminCall(`${detailPath(multiple.id)}/publish`, "POST", { expectedUpdatedAt: multiple.updatedAt });
+          assert.equal(published.status, 200, JSON.stringify(published.body));
+          const publishedItem = published.body.item as Record<string, any>;
+          assert.equal(publishedItem.publicationState, "published");
+          const publishedChange = await change(publishedItem, [second.id]);
+          assert.equal(publishedChange.status, 200, JSON.stringify(publishedChange.body));
+          assert.deepEqual(ids(publishedChange.body.item as Record<string, any>), [second.id]);
+          assert.equal((publishedChange.body.item as Record<string, any>).contentVersion, publishedItem.contentVersion);
+          const removeLastPublished = await change(publishedChange.body.item as Record<string, any>, []);
+          assert.equal(removeLastPublished.status, 422, JSON.stringify(removeLastPublished.body));
+          assert.deepEqual(ids(await detail(multiple.id)), [second.id]);
+
+          const exclusive = await create([topic.id]);
+          const scopedPath = `${detailPath(exclusive.id)}?orgId=${org.id}&topicId=${topic.id}`;
+          const scopedRead = await scopedCall(scopedPath);
+          assert.equal(scopedRead.status, 200, JSON.stringify(scopedRead.body));
+          assert.equal((await scopedCall(detailPath(exclusive.id))).status, 403);
+          const edit = await scopedCall(scopedPath, "PATCH", { expectedUpdatedAt: exclusive.updatedAt, title: "Scoped full editor" });
+          assert.equal(edit.status, 200, JSON.stringify(edit.body));
+          assert.equal((edit.body.item as Record<string, any>).title, "Scoped full editor");
+          for (const input of [{ focusTopicIds: [] }, { nativeBody: "Forbidden" }, { categoryId: exclusive.categoryId }]) {
+            assert.equal((await scopedCall(scopedPath, "PATCH", { expectedUpdatedAt: (edit.body.item as any).updatedAt, ...input })).status, 403);
+          }
+          assert.equal((await scopedCall(`${detailPath(exclusive.id)}/assignments?topicId=${topic.id}`, "PUT", {})).status, 403);
+          assert.equal((await scopedCall(`${detailPath(exclusive.id)}/archive?topicId=${topic.id}`, "POST", {})).status, 403);
+          assert.equal((await scopedCall(`${detailPath(exclusive.id)}?topicId=${unmanagedTopic.id}`)).status, 404);
+          assert.equal((await orgAdminCall(`${detailPath(exclusive.id)}?orgId=${foreignOrg.id}`)).status, 404);
+          await pool!.query("UPDATE focus_topic_assignments SET revoked_at=NOW(),revoked_by='local_test' WHERE id=$1", [managementGrant.body.id]);
+          const revoked = await scopedCall(scopedPath);
+          assert.ok([403, 404].includes(revoked.status), JSON.stringify(revoked.body));
+        } finally {
+          await pool!.query("UPDATE focus_topic_assignments SET revoked_at=NULL,revoked_by=NULL WHERE id=$1", [managementGrant.body.id]);
+          for (const id of createdIds) {
+            const links = await pool!.query<{ id: string }>("SELECT id FROM org_content_topic_attachments WHERE content_id=$1", [id]);
+            for (const link of links.rows) await pool!.query("DELETE FROM user_notifications WHERE dedup_key LIKE $1", [`focus-topic-content-attached:${link.id}:%`]);
+            await pool!.query("DELETE FROM org_content_topic_attachments WHERE content_id=$1", [id]);
+            await pool!.query("DELETE FROM org_content_items WHERE id=$1", [id]);
+            await pool!.query("DELETE FROM audit_events WHERE metadata->>'contentId'=$1", [id]);
+          }
+          await storage.save(before);
+        }
+      });
       const managerGrant = await masterCall(managementPath, "POST", {
         audience: "manager_only", subjectUserId: scopedManager.id,
       });
