@@ -215,6 +215,7 @@ import {
   formatDialogueForEvaluation
 } from "./aiPrompts.js";
 import {
+  OpenAiSpeechRequestError,
   requestCompletion,
   requestSpeechSynthesis,
   requestTranscription
@@ -1805,6 +1806,12 @@ function isUsableSimulationTranscriptText(value: string): boolean {
   return trimmed.length >= MIN_SIMULATION_TRANSCRIPT_CHARS && /[A-Za-z0-9]/.test(trimmed);
 }
 
+function isSimulationSpeechPrefetchRefusal(error: unknown): boolean {
+  return error instanceof AiBudgetLimitError || error instanceof SafeAiRouteError
+    || (error instanceof OpenAiSpeechRequestError && error.statusCode !== undefined
+      && error.statusCode >= 400 && error.statusCode < 500 && error.statusCode !== 408);
+}
+
 async function maybeBuildSimulationSpeechPrefetch(params: {
   route: "opening" | "turn";
   correlationId: string;
@@ -1925,6 +1932,9 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       chunkCount: chunks.length,
       ...safeErrorDiagnostics(error),
     });
+    // Keep deterministic refusals available to foreground waiters. Transient
+    // failures still settle without audio and may use one fresh synthesis.
+    if (isSimulationSpeechPrefetchRefusal(error)) throw error;
     return null;
   }
 }
@@ -23989,7 +23999,11 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
     });
     return;
   }
-  if (reusablePrefetch.status === "timeout" || reusablePrefetch.status === "hit") {
+  if (reusablePrefetch.status === "hit" && isSimulationSpeechPrefetchRefusal(reusablePrefetch.failure)) {
+    respondWithAiRouteError(response, reusablePrefetch.failure, { route: "tts", correlationId });
+    return;
+  }
+  if (reusablePrefetch.status === "timeout" || (reusablePrefetch.status === "hit" && !reusablePrefetch.startFresh)) {
     // A timeout only stops this waiter; it must not dispatch a competing
     // synthesis. A retry can join the same work or reuse its completed audio.
     respondWithTtsError({ status: reusablePrefetch.status === "timeout" ? 504 : 503,
@@ -24016,8 +24030,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       stage: "start",
       startedAtMs: ttsCallStartedAtMs
     });
-    const sharedSpeech = await simulationSpeechPrefetchRegistry.getOrStart({ correlationId, userId,
-      orgId: context.actingOrgId, sessionId: context.authorizedSimulation?.session.simulationSessionId ?? null, preset, text }, async () => {
+    const synthesizeSpeech = async () => {
       const budgetedTts = await invokeAiProviderWithBudget({
         context: {
           user: context.user,
@@ -24036,7 +24049,11 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
       });
       return { audioBase64: budgetedTts.value.audioBuffer.toString("base64"), contentType: budgetedTts.value.contentType,
         preset, chunkCount: 1, firstChunkChars: text.length, ttsLatencyMs: Date.now() - ttsCallStartedAtMs! };
-    });
+    };
+    const sharedSpeech = reusablePrefetch.status === "hit" && reusablePrefetch.startFresh
+      ? await reusablePrefetch.startFresh(synthesizeSpeech)
+      : await simulationSpeechPrefetchRegistry.getOrStart({ correlationId, userId,
+        orgId: context.actingOrgId, sessionId: context.authorizedSimulation?.session.simulationSessionId ?? null, preset, text }, synthesizeSpeech);
     if (!sharedSpeech) throw new SafeAiRouteError({ status: 503, code: "ai_unavailable", error: "AI voice is temporarily unavailable. Please retry AI Voice." });
     const ttsResult = { audioBuffer: Buffer.from(sharedSpeech.audioBase64, "base64"), contentType: sharedSpeech.contentType };
     const ttsCallEndedAtMs = Date.now();

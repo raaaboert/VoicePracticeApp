@@ -225,12 +225,47 @@ test("expired, failed, and empty prefetches have deterministic outcomes", async 
       promise,
       nowMs: 0,
     });
-    assert.deepEqual(await registry.consume({
+    const result = await registry.consume({
       correlationId: "empty",
       userId: "user-a",
       preset: "female-bright",
       text: "Text",
       nowMs: 1,
-    }), { status: "hit", value: null });
+    });
+    assert.equal(result.status, "hit");
+    assert.ok(result.status === "hit");
+    assert.equal(result.value, null);
+    assert.equal(typeof result.startFresh, "function");
   }
+});
+
+test("failed prefetch waiters share one fresh synthesis even when a waiter resumes after that synthesis failed", async () => {
+  const registry = new SimulationSpeechPrefetchRegistry<string>();
+  const identity = { correlationId: "failed-prefetch", userId: "u", orgId: "org", sessionId: "s", preset: "female-bright", text: "Response" };
+  let release!: (value: null) => void;
+  registry.register({ ...identity, promise: new Promise<null>(resolve => { release = resolve; }) });
+  const a = registry.consume(identity), b = registry.consume(identity);
+  release(null);
+  const [first, late] = await Promise.all([a, b]);
+  assert.ok(first.status === "hit" && first.startFresh);
+  assert.ok(late.status === "hit" && late.startFresh);
+  let attempts = 0;
+  const fail = async () => { attempts++; throw new Error("fresh failed"); };
+  await assert.rejects(first.startFresh(fail), /fresh failed/);
+  await assert.rejects(late.startFresh(fail), /fresh failed/);
+  assert.equal(attempts, 1, "a delayed waiter must not begin a third provider dispatch");
+  assert.equal((await registry.consume(identity)).status, "miss", "failed entries are removed");
+  assert.equal(await registry.getOrStart(identity, async () => "explicit manual retry"), "explicit manual retry");
+});
+
+test("a waiter on failed foreground synthesis has no automatic fresh-synthesis opportunity", async () => {
+  const registry = new SimulationSpeechPrefetchRegistry<string>();
+  const identity = { correlationId: "foreground", userId: "u", preset: "female-bright", text: "Response" };
+  let fail!: (error: Error) => void;
+  const original = registry.getOrStart(identity, () => new Promise<string>((_resolve, reject) => { fail = reject; }));
+  const waiter = registry.consume(identity);
+  await Promise.resolve();
+  const rejected = assert.rejects(original, /failed/);
+  fail(new Error("failed")); await rejected;
+  assert.deepEqual(await waiter, { status: "hit", value: null });
 });

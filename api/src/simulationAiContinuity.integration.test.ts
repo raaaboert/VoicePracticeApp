@@ -73,6 +73,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       persuasion: 8, clarity: 7, empathy: 9, assertiveness: 8, strengths: ["Clear"], improvements: ["Close"], summary: "Agreed a plan." };
     let providerCalls = 0, scoring = false, failProvider = false;
     let speechCalls = 0, speechGate: Promise<void> | null = null, speechEntered = () => {}, failSpeech = false;
+    let speechStatuses: number[] = [];
     let scoreGate: Promise<void> | null = null, scoreEntered = () => {};
     globalThis.fetch = async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
@@ -80,8 +81,9 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       providerCalls++;
       if (failProvider) return new Response(JSON.stringify({ error: { message: "private-provider-error" } }), { status: 500 });
       if (url.endsWith("/audio/speech")) {
+        const status = speechStatuses.shift() ?? (failSpeech ? 500 : 200);
         speechCalls++; speechEntered(); await speechGate;
-        return failSpeech ? Response.json({ error: { message: "mock speech failed" } }, { status: 500 })
+        return status !== 200 ? Response.json({ error: { message: "mock speech failed" } }, { status })
           : new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "audio/mpeg" } });
       }
       if (url.endsWith("/audio/transcriptions")) return Response.json({ text: "I will identify the concern and agree a clear next step." });
@@ -496,6 +498,76 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
         assert.equal((await fetchSpeech("failed-response")).status, 200); assert.equal(speechCalls - before, 5);
       } finally { release(); speechGate = null; failSpeech = false; registry.consume = consume; }
     });
+    for (const [waiters, freshStatus, prefetchStatus] of [[1, 200, 500], [2, 200, 500], [2, 500, 500], [2, 429, 500],
+      [2, 200, 401], [2, 200, 403], [2, 200, 429]] as const) {
+      await t.test(`settled speech prefetch ${prefetchStatus}: ${waiters} waiter(s), fresh ${freshStatus}, bounded authorized recovery`, { timeout: 15000 }, async () => {
+        api.clearRateLimitsForTest(); await db.pool.query("DELETE FROM ai_usage_events");
+        const id = `speech_failed_prefetch_${waiters}_${freshStatus}_${prefetchStatus}`; await start(id);
+        const opened = await call("ai/opening", requestContext(id)); assert.equal(opened.status, 200);
+        const grant = (await opened.json() as any).speechAuthorization;
+        const chunk = splitTextForRemoteTtsFastStart(text)[0]!;
+        const correlationId = `failed_prefetch_${waiters}_${freshStatus}_${prefetchStatus}`;
+        const registry = api.simulationSpeechPrefetchRegistry, consume = registry.consume.bind(registry);
+        const budgetPrototype = Object.getPrototypeOf(usage) as typeof usage;
+        const reserve = budgetPrototype.reserveBudget;
+        let release = () => {}, joined = () => {}, count = 0;
+        speechGate = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { speechEntered = resolve; });
+        const allJoined = new Promise<void>(resolve => { joined = resolve; });
+        speechStatuses = [prefetchStatus, freshStatus];
+        const before = speechCalls;
+        const fetchSpeech = () => originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/tts`, { method: "POST",
+          headers: { ...headers(), "X-Correlation-Id": correlationId },
+          body: JSON.stringify({ simulationSessionId: id, speechAuthorization: grant, text: chunk, preset: "female-balanced" }) });
+        try {
+          const prefetch = originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/opening`, { method: "POST",
+            headers: { ...headers(), "X-Correlation-Id": correlationId },
+            body: JSON.stringify({ ...requestContext(id), speechPrefetch: { preset: "female-balanced" } }) });
+          await started;
+          registry.consume = params => { const pending = consume(params); if (++count === waiters) joined(); return pending; };
+          const pending = Array.from({ length: waiters }, fetchSpeech);
+          await allJoined;
+          const forged = await originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/tts`, { method: "POST",
+            headers: { ...headers(), "X-Correlation-Id": correlationId },
+            body: JSON.stringify({ simulationSessionId: id, speechAuthorization: `${grant}-forged`, text: chunk, preset: "female-balanced" }) });
+          assert.equal(forged.status, 403, "joining a failed prefetch cannot bypass a speech grant");
+          const reserved = await db.pool.query("SELECT id FROM ai_usage_events WHERE kind='tts'");
+          assert.equal(reserved.rowCount, 1, "the pending prefetch has one durable budget reservation");
+          assert.equal(speechCalls - before, 1);
+          if (freshStatus === 429) {
+            budgetPrototype.reserveBudget = async function(params) {
+              return params.event.kind === "tts" ? { reserved: false, limitCode: "global_calls" } : reserve.call(this, params);
+            };
+          }
+          release();
+          const responses = await Promise.all(pending);
+          for (const result of responses) {
+            const success = prefetchStatus === 500 && freshStatus === 200;
+            const budgetDenied = prefetchStatus === 500 && freshStatus === 429;
+            assert.equal(result.status, success ? 200 : budgetDenied ? 429 : 503, await result.clone().text());
+            if (success) {
+              assert.equal(result.headers.get("Content-Type"), "audio/mpeg");
+              assert.equal(result.headers.get("X-TTS-Audio-Source"), "foreground_generation");
+              assert.deepEqual([...new Uint8Array(await result.arrayBuffer())], [1, 2, 3]);
+            } else {
+              const body = await result.json() as any;
+              assert.equal(body.code, budgetDenied ? "ai_budget_limit" : "ai_unavailable");
+              assert.doesNotMatch(body.error, /mock speech/);
+            }
+          }
+          assert.equal((await prefetch).status, 200, "text generation remains successful despite speech failure");
+          assert.equal(speechCalls - before, freshStatus === 429 || prefetchStatus !== 500 ? 1 : 2,
+            "one failed prefetch plus at most one authorized fresh synthesis; refusals never dispatch another provider call");
+          const measured = await db.pool.query("SELECT id FROM ai_usage_events WHERE kind='tts'");
+          assert.equal(measured.rowCount, prefetchStatus === 500 && freshStatus === 200 ? 1 : 0,
+            "only successful synthesis remains settled in ledger-OFF usage");
+          assert.ok(!measured.rows.some(row => row.id === reserved.rows[0].id), "the failed prefetch reservation was released");
+        } finally {
+          release(); speechGate = null; speechStatuses = []; speechEntered = () => {}; registry.consume = consume;
+          budgetPrototype.reserveBudget = reserve;
+        }
+      });
+    }
     await t.test("independent API processes dispatch one concurrent first score, recover failures and release ownership on process exit", { timeout: 30000 }, async () => {
       let calls = 0, fail = false, timeout = false;
       let release = () => {}, entered = () => {};

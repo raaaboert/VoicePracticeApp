@@ -9,7 +9,7 @@ export type SimulationSpeechPrefetchMissReason =
   | "text_mismatch";
 
 export type SimulationSpeechPrefetchConsumeResult<T> =
-  | { status: "hit"; value: T | null }
+  | { status: "hit"; value: T | null; failure?: unknown; startFresh?: (start: () => Promise<T | null>) => Promise<T | null> }
   | { status: "miss"; reason: SimulationSpeechPrefetchMissReason }
   | { status: "timeout" };
 
@@ -23,6 +23,9 @@ interface SimulationSpeechPrefetchEntry<T> {
   createdAtMs: number;
   promise: Promise<T | null>;
   settled: boolean;
+  source: "prefetch" | "foreground";
+  freshSynthesis?: Promise<T | null>;
+  failure?: unknown;
 }
 
 function normalizeText(value: string): string {
@@ -62,7 +65,7 @@ export class SimulationSpeechPrefetchRegistry<T> {
     const existing = this.entries.get(this.key(params));
     if (existing) return existing.promise;
     const promise = Promise.resolve().then(start);
-    this.register({ ...params, promise });
+    this.register({ ...params, promise, source: "foreground" });
     return promise;
   }
 
@@ -75,6 +78,7 @@ export class SimulationSpeechPrefetchRegistry<T> {
     text: string;
     promise: Promise<T | null>;
     nowMs?: number;
+    source?: "prefetch" | "foreground";
   }): void {
     this.sweep(params.nowMs ?? Date.now());
     const correlationId = params.correlationId.trim();
@@ -92,12 +96,14 @@ export class SimulationSpeechPrefetchRegistry<T> {
       textHash: hashText(params.text),
       createdAtMs: params.nowMs ?? Date.now(),
       settled: false,
+      source: params.source ?? "prefetch",
       promise: params.promise.then((value) => {
         entry.settled = true;
         if (value === null && this.entries.get(key) === entry) this.entries.delete(key);
         return value;
-      }, () => {
+      }, (error: unknown) => {
         entry.settled = true;
+        entry.failure = error;
         if (this.entries.get(key) === entry) this.entries.delete(key);
         return null;
       }),
@@ -150,10 +156,18 @@ export class SimulationSpeechPrefetchRegistry<T> {
       return { status: "miss", reason: mismatchReason };
     }
 
-    const settledPrefetch = entry.promise.then(
-      (value) => ({ status: "hit", value } as const),
-      () => ({ status: "hit", value: null } as const),
-    );
+    const settledPrefetch = entry.promise.then((value): SimulationSpeechPrefetchConsumeResult<T> => ({
+      status: "hit", value,
+      ...(entry.source === "prefetch" && entry.failure !== undefined ? { failure: entry.failure } : {}),
+      ...(value === null && entry.source === "prefetch" ? {
+        // All waiters on this failed prefetch share one existing foreground
+        // dispatch, even if it fails before a later waiter resumes. Foreground
+        // failures never acquire another automatic recovery opportunity.
+        startFresh: (start: () => Promise<T | null>) => (
+          entry.freshSynthesis ??= this.getOrStart(params, start)
+        ),
+      } : {}),
+    }));
     if (params.waitMs === undefined) {
       return await settledPrefetch;
     }
