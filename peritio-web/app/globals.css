@@ -626,6 +626,26 @@ select.text-input {
   margin-bottom: 1rem;
 }
 
+.settings-support-card .section-header {
+  margin-bottom: 0;
+}
+
+.settings-support-copy {
+  min-width: 0;
+}
+
+.settings-support-copy .section-copy {
+  margin-bottom: 0;
+}
+
+.settings-support-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .history-toggle-button {
   display: inline-flex;
   align-items: center;

@@ -1,6 +1,7 @@
 "use client";
 
 import { ThemeMode, useTheme } from "@/src/components/ThemeProvider";
+import { ContactSupportCard } from "./ContactSupportCard";
 
 const THEME_OPTIONS: Array<{
   id: ThemeMode;
@@ -61,19 +62,7 @@ export function ThemeSettingsPanel() {
         </div>
       </section>
 
-      <section className="section-card">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Coming next</p>
-            <h2>Account preferences</h2>
-            <p className="section-copy">
-              Profile controls, notification preferences, and dashboard defaults will appear here as account-level
-              preferences roll out.
-            </p>
-          </div>
-          <span className="pill muted">More settings soon</span>
-        </div>
-      </section>
+      <ContactSupportCard />
     </div>
   );
 }

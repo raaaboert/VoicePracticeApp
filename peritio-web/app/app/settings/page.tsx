@@ -7,7 +7,7 @@ export default function SettingsPage() {
       <PageHeader
         eyebrow="Settings"
         title="Workspace settings"
-        description="Manage appearance preferences today and keep future workspace settings in one place."
+        description="Choose your dashboard appearance or contact Peritio support."
       />
 
       <ThemeSettingsPanel />
