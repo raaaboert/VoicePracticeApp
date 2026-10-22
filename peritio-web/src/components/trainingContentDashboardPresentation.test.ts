@@ -30,6 +30,23 @@ const libraryClientSource = readFileSync(
   "utf8"
 );
 
+test("Learning Resource manager assignment controls fit their desktop column without fixed minimums", () => {
+  const styles = readFileSync(join(webRoot, "app/globals.css"), "utf8");
+  assert.match(editorSource, /className="assignment-columns"/);
+  assert.match(editorSource, /className=\{`manager-assignment-row/);
+  const row = styles.match(/\.training-content-editor \.manager-assignment-row \{([^}]+)\}/)?.[1];
+  assert.ok(row);
+  assert.match(row, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.training-content-editor \.manager-assignment-row > span \{\s*grid-column: 1 \/ -1/);
+  assert.match(styles, /\.training-content-editor \.manager-assignment-row label \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere/);
+  assert.match(styles, /\.training-content-editor \.manager-assignment-row input \{\s*flex: 0 0 auto/);
+  assert.match(styles, /@media \(max-width: 720px\) \{\s*\.training-content-editor \.manager-assignment-row \{\s*grid-template-columns: minmax\(0, 1fr\)/);
+  // Existing native inputs, rules, and accessible removal controls are retained.
+  assert.match(editorSource, /toggleManagerRule\("managers", target, event.target.checked\)/);
+  assert.match(editorSource, /toggleManagerRule\("managerTeams", target, event.target.checked\)/);
+  assert.match(editorSource, /aria-label=\{`Remove \$\{target.displayName\} manager rules`\}/);
+});
+
 test("Training Content navigation uses the shared Admin navigation and dedicated pages", () => {
   assert.equal(adminSource.includes("<TrainingContentAdminNav"), true);
   assert.equal(adminSource.includes("viewer.orgRole"), false);

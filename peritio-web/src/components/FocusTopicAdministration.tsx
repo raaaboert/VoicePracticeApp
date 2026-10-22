@@ -2,7 +2,7 @@
 
 import { buildScenarioGenerationRequest, generatedScenarioContextMatches } from "./practiceScenarioGenerationContext";
 
-import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import type {
   CustomerPracticeScenario,
@@ -37,6 +37,7 @@ import { editableScenarioIndustries, scenarioRolesForIndustries, publishedScenar
 type TopicRow = Pick<OrgTrainingSummary, "id" | "name" | "description" | "status">;
 type Audience = DashboardFocusTopicAssignment["audience"];
 type ScenarioGroup = "active" | "archived";
+const DRAFT_TOPIC_RESTRICTION = "This Focus Topic is in Draft. To attach related content or generate custom scenarios, change the Topic to Active and save.";
 const AUDIENCES: Array<{ value: Audience; label: string; description: string }> = [
   { value: "organization", label: "Entire organization", description: "Every active learner in this organization." },
   { value: "managers_and_admins", label: "Managers & Admins", description: "Organization admins, user admins, and current managers." },
@@ -185,6 +186,9 @@ export function FocusTopicAdministration({
   const [transcriptText, setTranscriptText] = useState("");
   const scenarioGenerationInFlight = useRef(false);
   const selected = topics.find((topic) => topic.id === selectedId) ?? null;
+  // Only the saved Topic status unlocks these actions, not an unsaved selection.
+  const topicIsDraft = selected?.status === "draft";
+  const topicContentEnabled = selected?.status === "active";
   // Scoped Topic managers may create only individual learner assignments. Their
   // selector has one visible option, so derive the effective value rather than
   // retaining the initial organization-wide default in hidden component state.
@@ -354,6 +358,7 @@ export function FocusTopicAdministration({
   });
   const attachContent = (contentId: string) => void run(async () => {
     if (!selected) return;
+    if (!topicContentEnabled) { setError(DRAFT_TOPIC_RESTRICTION); return; }
     try {
       await action<DashboardFocusTopicContentAttachment>({
         action: "attach_content", orgId, topicId: selected.id, contentId,
@@ -522,6 +527,7 @@ export function FocusTopicAdministration({
   };
   const generateScenarioDraft = () => {
     if (scenarioGenerationInFlight.current || !selected || !practiceScenarios) return;
+    if (!topicContentEnabled) { setError(DRAFT_TOPIC_RESTRICTION); return; }
     let generationInput;
     try { generationInput = buildScenarioGenerationRequest(practiceScenarios, scenarioSegmentId,
       scenarioIndustryIds, scenarioSourceContentIds, scenarioPracticeGuidance); }
@@ -781,13 +787,21 @@ export function FocusTopicAdministration({
           <textarea className="text-input focus-topic-description" id="focus-topic-description" value={description}
             rows={5} maxLength={4000} disabled={busy || !canManageAllTopics || selected?.status === "archived"}
             onChange={(event) => setDescription(event.target.value)} /></div>
-        {selected ? <div className="focus-topic-field focus-topic-status-field"><label htmlFor="focus-topic-status">Status</label>
+        {selected ? <div className="focus-topic-field focus-topic-status-field"><label htmlFor="focus-topic-status">Status
+          {topicIsDraft ? <TriangleAlert className="focus-topic-draft-marker" aria-hidden="true" size={18} /> : null}</label>
           <select className="text-input" id="focus-topic-status" value={status}
+            aria-describedby={topicIsDraft ? "focus-topic-draft-warning" : undefined}
             disabled={busy || !canManageAllTopics || selected.status === "archived"}
             onChange={(event) => setStatus(event.target.value as "draft" | "active")}>
             <option value="draft">Draft</option><option value="active">Active</option>
             {selected.status === "archived" ? <option value="archived">Archived</option> : null}
           </select></div> : null}
+        {topicIsDraft ? <div className="focus-topic-draft-warning" id="focus-topic-draft-warning" role="status">
+          <TriangleAlert aria-hidden="true" size={20} /><div><strong>Draft Topic — content actions unavailable</strong>
+            <p>{DRAFT_TOPIC_RESTRICTION}</p>
+            {!canManageAllTopics ? <p>Ask an Organization Admin to activate this Topic.</p> : null}
+          </div>
+        </div> : null}
       </div>
       {canManageAllTopics ? <div className="focus-topic-actions">
         <button type="button" className="primary-button" disabled={busy || !name.trim() || selected?.status === "archived"}
@@ -874,7 +888,8 @@ export function FocusTopicAdministration({
     {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-practice`} headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
       title="Practice Scenarios"
       summary={`${orderedPracticeScenarios.length} scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
-      description="Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version.">
+      description={topicIsDraft ? "Scenario generation from Related Content is unavailable while this Topic is Draft. Change it to Active and save."
+        : "Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version."}>
       {practiceScenarios && !practiceScenarios.permissions.creationEnabled
         ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
         : null}
@@ -949,6 +964,12 @@ export function FocusTopicAdministration({
             </fieldset>
           </div>
           <p className="muted-copy">Choose the learner Role and applicable industries before generating. These selections also apply to the saved draft.</p>
+          {topicIsDraft ? <p className="focus-topic-draft-warning" id="focus-topic-generation-restriction" role="status">
+            <TriangleAlert aria-hidden="true" size={20} />{DRAFT_TOPIC_RESTRICTION}
+          </p> : null}
+          <fieldset className="focus-topic-content-controls" disabled={!topicContentEnabled}
+            aria-describedby={topicIsDraft ? "focus-topic-generation-restriction" : undefined}>
+          <legend>Generate a scenario from Related Content</legend>
           <div className="focus-topic-scenario-generation-heading"><h4>Generate Scenario Draft</h4>
             <span className="focus-topic-generation-help">
               <button type="button" className="focus-topic-generation-help-button" aria-label="How scenario generation works"
@@ -973,13 +994,14 @@ export function FocusTopicAdministration({
           <label className="focus-topic-field focus-topic-field-wide">Optional practice guidance
             <textarea className="text-input focus-topic-long-textarea" rows={4} maxLength={2000} value={scenarioPracticeGuidance}
               onChange={(event) => setScenarioPracticeGuidance(event.target.value)} /></label>
-          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={busy || generatingScenario || scenarioSourceContentIds.length === 0 || practiceScenarios.industryOptions.length === 0}
+          <div className="focus-topic-actions"><button type="button" className="primary-button" disabled={!topicContentEnabled || busy || generatingScenario || scenarioSourceContentIds.length === 0 || practiceScenarios.industryOptions.length === 0}
             onClick={generateScenarioDraft}>
             {generatingScenario ? <><LoaderCircle aria-hidden="true" className="spin" size={18} /> Generating scenario…</> : "Generate Scenario"}
           </button></div>
           {generatingScenario ? <p className="focus-topic-generation-status" role="status" aria-live="polite">
             Generating a draft from the selected sources…
           </p> : null}
+          </fieldset>
           {generatedContextChanged ? <div className="notice" role="status">Role or industries changed. Regenerate the draft or restore its original selections before saving. Your text edits are preserved.</div> : null}
           {generatedScenario?.similarity.flagged ? <div className="notice" role="status">
             This draft is similar to an existing Topic scenario. Review it before saving.
@@ -1039,7 +1061,14 @@ export function FocusTopicAdministration({
 
     {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-related`} headingId="focus-topic-related-heading" eyebrow="Learning Resources"
       title="Related Content" summary={`${attachedContent.length} attached · ${availableContent.length} available`}
-      description="Attach an existing organization resource or upload a new draft for this Topic.">
+      description={topicIsDraft ? "Unavailable while this Topic is Draft. Change it to Active and save to manage Related Content."
+        : "Attach an existing organization resource or upload a new draft for this Topic."}>
+      {topicIsDraft ? <p className="focus-topic-draft-warning" id="focus-topic-content-restriction" role="status">
+        <TriangleAlert aria-hidden="true" size={20} />{DRAFT_TOPIC_RESTRICTION}
+      </p> : null}
+      <fieldset className="focus-topic-content-controls" disabled={!topicContentEnabled}
+        aria-describedby={topicIsDraft ? "focus-topic-content-restriction" : undefined}>
+      <legend>Related Content management</legend>
       {!learningResourcesEnabled || related?.permissions.learningResourcesEnabled === false
         ? <div className="notice" role="status">Learning Resources are not enabled for this organization. Related Content is read-only.</div>
         : null}
@@ -1184,6 +1213,7 @@ export function FocusTopicAdministration({
             {newSourceMode === "file" ? "Create Draft & Upload" : "Create Draft YouTube Resource"}
           </button>
         </div> : null}
+      </fieldset>
     </FocusTopicWorkspaceSection> : null}
   </section>;
 }

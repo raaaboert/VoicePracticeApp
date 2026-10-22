@@ -3006,6 +3006,49 @@ input[type="radio"] {
   accent-color: var(--accent);
 }
 
+/* The assignment area is two columns even on desktop: keep manager controls
+   inside their own column rather than sizing them to an entire page row. */
+.training-content-editor .assignment-columns > div,
+.training-content-editor .assignment-selection-summary,
+.training-content-editor .manager-assignment-list {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.training-content-editor .manager-assignment-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  min-width: 0;
+}
+
+.training-content-editor .manager-assignment-row > span {
+  grid-column: 1 / -1;
+}
+
+.training-content-editor .manager-assignment-row label {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  align-items: flex-start;
+}
+
+.training-content-editor .manager-assignment-row input {
+  flex: 0 0 auto;
+}
+
+.training-content-editor .assignment-chip > span,
+.training-content-editor .assignment-columns .input-with-icon,
+.training-content-editor .assignment-columns .text-input {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 720px) {
+  .training-content-editor .manager-assignment-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .assignment-result-row {
   cursor: pointer;
 }
@@ -3384,9 +3427,11 @@ input[type="radio"] {
 
 .focus-topic-admin {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.25rem;
   width: 100%;
   max-width: 74rem;
+  min-width: 0;
 }
 
 .focus-topic-selector {
@@ -3395,9 +3440,11 @@ input[type="radio"] {
 
 .focus-topic-admin-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   width: 100%;
   max-width: 68rem;
+  min-width: 0;
   padding: 1.15rem;
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -3417,6 +3464,7 @@ input[type="radio"] {
 
 .focus-topic-panel-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
@@ -3456,6 +3504,8 @@ input[type="radio"] {
 
 .focus-topic-panel-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 1rem;
 }
 
@@ -3679,6 +3729,57 @@ input[type="radio"] {
   max-width: 15rem;
 }
 
+.focus-topic-status-field > label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.focus-topic-draft-marker {
+  color: var(--warning);
+}
+
+.focus-topic-draft-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  overflow-wrap: anywhere;
+}
+
+.focus-topic-draft-warning > svg {
+  flex: 0 0 auto;
+}
+
+.focus-topic-draft-warning p {
+  margin: 0.35rem 0 0;
+}
+
+.focus-topic-content-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.focus-topic-content-controls > legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .focus-topic-description {
   min-height: 7rem;
   resize: vertical;
@@ -3762,6 +3863,8 @@ input[type="radio"] {
 
 .focus-topic-assignment-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 0.65rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border);
@@ -3769,12 +3872,15 @@ input[type="radio"] {
 
 .focus-topic-assignment-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 0.6rem;
   max-width: 64rem;
 }
 
 .focus-topic-assignment-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1rem;
   min-width: 0;
@@ -3782,6 +3888,20 @@ input[type="radio"] {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-raised);
+}
+
+.focus-topic-assignment-row > .training-content-order-copy {
+  flex-basis: min(100%, 20rem);
+}
+
+.focus-topic-admin :is(input, select, textarea) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.focus-topic-section-copy,
+.focus-topic-assignment-section {
+  overflow-wrap: anywhere;
 }
 
 .focus-topic-assignment-row.revoked {

@@ -720,6 +720,120 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         body?: Record<string, unknown>) => dashboardCall(scopedSessionToken, path, method, body);
       const orgAdminCall = (path: string, method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>) => dashboardCall(orgAdminSession.token, path, method, body);
+      await t.test("library creation with a selected Topic persists a direct attachment on subsequent reads", async () => {
+        const before = structuredClone(await storage.load());
+        const selectedTopic = { ...topic, id: "library_creation_topic", name: "Library creation Topic" };
+        await storage.save({ ...before, orgTrainings: [...before.orgTrainings, selectedTopic] });
+        let createdId: string | undefined;
+        try {
+          const created = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+            title: "New library resource with selected Topic", description: "",
+            contentType: "native", nativeBody: "Learning material.", focusTopicId: selectedTopic.id,
+          });
+          assert.equal(created.status, 201, JSON.stringify(created.body));
+          const item = created.body.item as { id: string; focusTopicId: string };
+          createdId = item.id;
+          assert.equal(item.focusTopicId, selectedTopic.id);
+          assert.equal((await pool!.query(`SELECT 1 FROM org_content_topic_attachments
+            WHERE org_id=$1 AND topic_id=$2 AND content_id=$3 AND detached_at IS NULL`,
+          [org.id, selectedTopic.id, item.id])).rowCount, 1);
+          for (let read = 0; read < 2; read += 1) {
+            const refreshed = await orgAdminCall(`/orgs/${org.id}/trainings/${selectedTopic.id}/direct-attachments`);
+            assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+            assert.ok((refreshed.body.content as Array<{ contentId: string; detachedAt: string | null }>)
+              .some((entry) => entry.contentId === item.id && entry.detachedAt === null));
+          }
+          // Creation never publishes the resource or creates a broad standalone assignment.
+          assert.equal((created.body.item as { publicationState: string }).publicationState, "draft");
+          assert.equal((await pool!.query("SELECT 1 FROM org_content_assignments WHERE content_id=$1", [item.id])).rowCount, 0);
+
+          const draftState = structuredClone(await storage.load());
+          draftState.orgTrainings.find((entry) => entry.id === selectedTopic.id)!.status = "draft";
+          await storage.save(draftState);
+          const draftCreation = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+            title: "Draft Topic attachment denied", description: "", contentType: "native",
+            nativeBody: "Material", focusTopicId: selectedTopic.id,
+          });
+          assert.equal(draftCreation.status, 400, JSON.stringify(draftCreation.body));
+          assert.match(String(draftCreation.body.error), /Active Focus Topic/);
+          assert.equal((await pool!.query("SELECT 1 FROM org_content_items WHERE title='Draft Topic attachment denied'")).rowCount, 0);
+          await storage.save({ ...draftState, orgTrainings: draftState.orgTrainings.map((entry) =>
+            entry.id === selectedTopic.id ? selectedTopic : entry) });
+
+          const foreignSelection = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+            title: "Foreign Topic denied", description: "", contentType: "native",
+            nativeBody: "Material", focusTopicId: foreignTopic.id,
+          });
+          assert.equal(foreignSelection.status, 400, JSON.stringify(foreignSelection.body));
+          assert.equal((await pool!.query("SELECT 1 FROM org_content_items WHERE title='Foreign Topic denied'")).rowCount, 0);
+
+          // The resource must not survive an attachment failure.
+          await pool!.query(`CREATE FUNCTION reject_library_attachment() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'local attachment failure'; END $$`);
+          await pool!.query(`CREATE TRIGGER reject_library_attachment BEFORE INSERT ON org_content_topic_attachments
+            FOR EACH ROW EXECUTE FUNCTION reject_library_attachment()`);
+          try {
+            const rejected = await orgAdminCall("/dashboard/admin/training-content", "POST", {
+              title: "Library attachment must roll back", description: "", contentType: "native",
+              nativeBody: "Material", focusTopicId: selectedTopic.id,
+            });
+            assert.equal(rejected.status, 500, JSON.stringify(rejected.body));
+            assert.equal((await pool!.query("SELECT 1 FROM org_content_items WHERE title='Library attachment must roll back'")).rowCount, 0);
+          } finally {
+            await pool!.query("DROP TRIGGER reject_library_attachment ON org_content_topic_attachments");
+            await pool!.query("DROP FUNCTION reject_library_attachment()");
+          }
+        } finally {
+          if (createdId) {
+            await pool!.query("DELETE FROM org_content_topic_attachments WHERE content_id=$1", [createdId]);
+            await pool!.query("DELETE FROM org_content_items WHERE id=$1", [createdId]);
+            await pool!.query("DELETE FROM audit_events WHERE metadata->>'contentId'=$1", [createdId]);
+          }
+          await storage.save(before);
+        }
+      });
+      await t.test("Attach Existing persists a published organization resource and refreshes without duplicate relationships", async () => {
+        const before = structuredClone(await storage.load());
+        const selectedTopic = { ...topic, id: "existing_content_topic", name: "Existing content Topic" };
+        await storage.save({ ...before, orgTrainings: [...before.orgTrainings, selectedTopic] });
+        const path = `/orgs/${org.id}/trainings/${selectedTopic.id}/direct-attachments`;
+        let attachmentId: string | undefined;
+        try {
+          const available = await orgAdminCall(path);
+          assert.equal(available.status, 200, JSON.stringify(available.body));
+          assert.ok((available.body.contentItems as Array<{ id: string; availableToAttach: boolean }>)
+            .some((item) => item.id === contentId && item.availableToAttach));
+          const attached = await orgAdminCall(path, "POST", { kind: "content", contentId });
+          assert.equal(attached.status, 201, JSON.stringify(attached.body));
+          attachmentId = attached.body.id as string;
+          const stored = await pool!.query(`SELECT org_id,topic_id,content_id FROM org_content_topic_attachments
+            WHERE id=$1 AND detached_at IS NULL`, [attachmentId]);
+          assert.deepEqual(stored.rows, [{ org_id: org.id, topic_id: selectedTopic.id, content_id: contentId }]);
+          assert.equal((await orgAdminCall(path, "POST", { kind: "content", contentId })).status, 409);
+          for (let read = 0; read < 2; read += 1) {
+            const refreshed = await orgAdminCall(path);
+            assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+            assert.deepEqual((refreshed.body.content as Array<{ id: string }>).map((row) => row.id), [attachmentId]);
+          }
+          const draftState = structuredClone(await storage.load());
+          draftState.orgTrainings.find((entry) => entry.id === selectedTopic.id)!.status = "draft";
+          await storage.save(draftState);
+          const draftAttach = await orgAdminCall(path, "POST", { kind: "content", contentId });
+          assert.equal(draftAttach.status, 403, JSON.stringify(draftAttach.body));
+          assert.equal(draftAttach.body.code, "focus_topic_content_scope_denied");
+          assert.equal((await pool!.query("SELECT 1 FROM org_content_topic_attachments WHERE topic_id=$1 AND detached_at IS NULL",
+            [selectedTopic.id])).rowCount, 1);
+          assert.equal((await orgAdminCall(`/orgs/${foreignOrg.id}/trainings/${foreignTopic.id}/direct-attachments`,
+            "POST", { kind: "content", contentId })).status, 404);
+        } finally {
+          if (attachmentId) {
+            await pool!.query("DELETE FROM user_notifications WHERE dedup_key LIKE $1", [`focus-topic-content-attached:${attachmentId}:%`]);
+            await pool!.query("DELETE FROM org_content_topic_attachments WHERE id=$1", [attachmentId]);
+            await pool!.query("DELETE FROM audit_events WHERE metadata->>'attachmentId'=$1", [attachmentId]);
+          }
+          await storage.save(before);
+        }
+      });
       const managerGrant = await masterCall(managementPath, "POST", {
         audience: "manager_only", subjectUserId: scopedManager.id,
       });

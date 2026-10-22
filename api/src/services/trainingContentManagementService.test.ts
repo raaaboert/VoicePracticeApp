@@ -254,6 +254,10 @@ function harness(
       });
       return current;
     },
+    async createTopicScopedContent(input: any) {
+      calls.push({ method: "createTopicScoped", input });
+      return { detail: await this.createContent(input) };
+    },
     async updateContent(input: any) {
       calls.push({ method: "update", input });
       current = detail({
@@ -616,6 +620,32 @@ test("native creation accepts constrained Markdown and rejects raw HTML, images,
         && error.code === "training_content_invalid"
     );
   }
+});
+
+test("selected Topics use atomic direct creation only when assignments authority requests it", async () => {
+  const input = { contentType: "native" as const, title: "Related", nativeBody: "Material", focusTopicId: "topic_1" };
+  const direct = harness();
+  const transactionGuard = async () => {};
+  const created = await direct.service.createContent({
+    context: { ...context, transactionGuard }, references, input, attachSelectedTopic: true,
+  });
+  assert.equal(created.focusTopicId, "topic_1");
+  const scoped = direct.calls.find((call) => call.method === "createTopicScoped");
+  assert.ok(scoped);
+  assert.equal(scoped.input.topicId, "topic_1");
+  assert.equal(scoped.input.transactionGuard, transactionGuard);
+  assert.match(scoped.input.attachmentId, /^ftca_/);
+
+  const legacy = harness();
+  await legacy.service.createContent({ context, references, input });
+  assert.equal(legacy.calls.some((call) => call.method === "createTopicScoped"), false);
+
+  const standalone = harness();
+  await standalone.service.createContent({ context, references,
+    input: { ...input, focusTopicId: null }, attachSelectedTopic: true });
+  assert.equal(standalone.calls.some((call) => call.method === "createTopicScoped"), false);
+  await assert.rejects(direct.service.createContent({ context, references, input, attachSelectedTopic: true }),
+    /requires a transaction guard/);
 });
 
 test("content categories are required, tenant-scoped, and distinct from optional Focus Topics", async () => {

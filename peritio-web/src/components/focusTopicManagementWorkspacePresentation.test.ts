@@ -10,6 +10,42 @@ const styles = readFileSync(join(componentsDir, "../../app/globals.css"), "utf8"
 const page = readFileSync(join(componentsDir, "../../app/app/admin/focus-topics/page.tsx"), "utf8");
 const proxy = readFileSync(join(componentsDir, "../../app/api/admin/focus-topic-management/route.ts"), "utf8");
 
+test("Draft Topics explain restrictions beside Status and keep content controls disabled until Active is saved", () => {
+  assert.match(source, /const topicIsDraft = selected\?\.status === "draft"/);
+  assert.match(source, /const topicContentEnabled = selected\?\.status === "active"/);
+  assert.doesNotMatch(source, /const topicContentEnabled = status === "active"/);
+  assert.match(source, /This Focus Topic is in Draft\. To attach related content or generate custom scenarios, change the Topic to Active and save\./);
+  assert.match(source, /TriangleAlert className="focus-topic-draft-marker" aria-hidden="true"/);
+  assert.match(source, /aria-describedby=\{topicIsDraft \? "focus-topic-draft-warning" : undefined\}/);
+  assert.match(source, /id="focus-topic-draft-warning" role="status"/);
+  assert.match(source, /Ask an Organization Admin to activate this Topic/);
+  assert.match(source, /id="focus-topic-content-restriction" role="status"/);
+  assert.match(source, /id="focus-topic-generation-restriction" role="status"/);
+  assert.equal((source.match(/<fieldset className="focus-topic-content-controls" disabled=\{!topicContentEnabled\}/g) ?? []).length, 2);
+  const attach = source.slice(source.indexOf("const attachContent ="), source.indexOf("const detachContent ="));
+  const generate = source.slice(source.indexOf("const generateScenarioDraft ="), source.indexOf("const beginScenarioRevision ="));
+  for (const handler of [attach, generate]) {
+    assert.ok(handler.indexOf("if (!topicContentEnabled)") < handler.indexOf("await action<"));
+    assert.match(handler, /setError\(DRAFT_TOPIC_RESTRICTION\)/);
+  }
+  assert.match(styles, /\.focus-topic-draft-warning \{[^}]*background: var\(--warning-soft\);[^}]*color: var\(--warning\)/);
+  assert.match(styles, /\.focus-topic-content-controls \{[^}]*min-width: 0;[^}]*border: 0/);
+});
+
+test("Topic resource panels shrink within their cards and wrap content actions without clipping", () => {
+  for (const selector of ["focus-topic-admin", "focus-topic-admin-panel", "focus-topic-panel-body",
+    "focus-topic-assignment-section", "focus-topic-assignment-list"]) {
+    const rule = styles.match(new RegExp(`\\.${selector} \\{([^}]+)\\}`))?.[1];
+    assert.ok(rule, selector);
+    assert.match(rule, /grid-template-columns: minmax\(0, 1fr\)/);
+    assert.match(rule, /min-width: 0/);
+  }
+  assert.match(styles, /\.focus-topic-assignment-row \{[^}]*flex-wrap: wrap/);
+  assert.match(styles, /\.focus-topic-admin :is\(input, select, textarea\) \{[^}]*max-width: 100%/);
+  assert.match(styles, /\.focus-topic-assignment-row > \.training-content-order-copy \{[^}]*flex-basis: min\(100%, 20rem\)/);
+  assert.match(styles, /\.focus-topic-panel-body\[hidden\] \{\s*display: none/);
+});
+
 test("Focus Topic workspace separates details, learner access, scoped managers, and Related Content", () => {
   for (const copy of [
     "Topic details",

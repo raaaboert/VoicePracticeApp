@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { fromMarkdown } from "mdast-util-from-markdown";
 
 import {
@@ -142,6 +143,7 @@ export interface TrainingContentManagementService {
     context: TrainingContentManagementRequestContext;
     references: TrainingContentReferenceData;
     input: CreateDashboardTrainingContentRequest;
+    attachSelectedTopic?: boolean;
     now?: Date;
   }): Promise<DashboardTrainingContentDetail>;
   updateContent(params: {
@@ -283,6 +285,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     context: TrainingContentManagementRequestContext;
     references: TrainingContentReferenceData;
     input: CreateDashboardTrainingContentRequest;
+    attachSelectedTopic?: boolean;
     now?: Date;
   }): Promise<DashboardTrainingContentDetail> {
     await this.authorize(params.context);
@@ -328,7 +331,7 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
     const externalUrl = externalKind === "youtube"
       ? canonicalizeYouTubeForInput(params.input.externalUrl)
       : normalizeExternalUrlForType(params.input.externalUrl, contentType);
-    const detail = await this.dependencies.store.createContent({
+    const creation = {
       orgId: params.context.orgId,
       categoryId: category.id,
       title: normalizeTitle(params.input.title),
@@ -341,7 +344,23 @@ class DefaultTrainingContentManagementService implements TrainingContentManageme
       externalKind,
       actor,
       now: params.now,
-    });
+    };
+    let detail: TrainingContentManagementDetail;
+    if (params.attachSelectedTopic && focusTopic) {
+      if (!params.context.transactionGuard) {
+        throw new Error("Direct Topic content creation requires a transaction guard.");
+      }
+      // Store the selected Topic relationship with the resource, never as a
+      // separate best-effort write or legacy metadata-only association.
+      ({ detail } = await this.dependencies.store.createTopicScopedContent({
+        ...creation,
+        topicId: focusTopic.id,
+        attachmentId: `ftca_${randomUUID()}`,
+        transactionGuard: params.context.transactionGuard,
+      }));
+    } else {
+      detail = await this.dependencies.store.createContent(creation);
+    }
     if (relatedScenarioIds !== undefined) {
       await this.dependencies.scenarioLinkService.replaceScenarioLinksForContent({
         config: params.references.scenarioConfig,

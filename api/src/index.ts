@@ -9009,6 +9009,7 @@ function createScopedContentTransactionGuard(params: {
 function createCentralContentTransactionGuard(params: {
   orgId: string;
   actorId: string;
+  topicId?: string;
 }): (client: AppStateTransactionClient) => Promise<void> {
   return async (client) => {
     const stateResult = await client.query<{ state_json: unknown }>(
@@ -9030,6 +9031,16 @@ function createCentralContentTransactionGuard(params: {
         403,
         "dashboard_scope_denied",
       );
+    }
+    if (params.topicId) {
+      const topic = findOrgTrainingRecord(currentDb, organization.id, params.topicId);
+      if (!topic || topic.status !== "active") {
+        throw new FocusTopicScopedContentError(
+          "Related Content requires an Active Focus Topic. Change the Topic to Active and save.",
+          400,
+          "training_content_invalid",
+        );
+      }
     }
     const entitlementResult = await client.query<{ enabled: boolean }>(
       `SELECT enabled FROM org_module_entitlements
@@ -14104,9 +14115,18 @@ app.post(
     }
     try {
       const item = await trainingContentManagementService.createContent({
-        context: resources.context,
+        context: {
+          ...resources.context,
+          transactionGuard: createCentralContentTransactionGuard({
+            orgId: resources.org.id,
+            actorId: resources.context.actorId,
+            topicId: typeof request.body?.focusTopicId === "string"
+              ? request.body.focusTopicId.trim() : undefined,
+          }),
+        },
         references: resources.references,
         input: request.body as CreateDashboardTrainingContentRequest,
+        attachSelectedTopic: runtimeConfig.focusTopicAuthority === "assignments",
       });
       response.status(201).json({
         viewer: {
@@ -14119,7 +14139,7 @@ app.post(
         fileLimitsBytes: trainingContentManagementService.getFileLimits(),
       });
     } catch (error) {
-      respondWithTrainingContentManagementError(error, response);
+      respondWithFocusTopicScopedContentError(error, response);
     }
   }
 );
