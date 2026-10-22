@@ -38,7 +38,7 @@ function callback(source: string, name: string, context: Record<string, any>) {
   return new Function(...Object.keys(context), `${code}\nreturn run;`)(...Object.values(context));
 }
 
-function screenHarness(options: { registrationError?: Error; openingError?: Error; local?: boolean; configured?: boolean } = {}) {
+function screenHarness(options: { registrationError?: Error; openingError?: Error; local?: boolean; configured?: boolean; platform?: "android" | "ios" } = {}) {
   const startup = createSimulationStartupCoordinator();
   const events = { registrations: 0, openings: 0, capture: 0, stopped: 0, cancelled: 0, completions: [] as SessionTiming[], histories: [] as DialogueMessage[][], exits: [] as string[] };
   const state: Record<string, any> = {};
@@ -47,7 +47,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
     startup, config: { simulationSessionId: "same-session", scenario: { id: "scenario", segmentId: "role", title: "Scenario" },
       maxSimulationMinutes: 20, difficulty: "medium", personaStyle: "skeptical" },
     userId: "learner", authToken: "auth", apiConfigured: options.configured ?? true,
-    localTestMode: options.local ?? false, isInitializing: false, mode: "idle", Platform: { OS: "ios" }, shouldUseFastStartRemoteTts: false,
+    localTestMode: options.local ?? false, isInitializing: false, mode: "idle", Platform: { OS: options.platform ?? "ios" }, shouldUseFastStartRemoteTts: false,
     logSimulationTiming: () => {}, logSimulationApiCall: () => {}, submitAutoErrorReport: async (_name: string, error: unknown) => {
       if (error instanceof ReferenceError) throw error;
     },
@@ -220,6 +220,9 @@ for (const [name, error, kind] of [
     await h.run("startSession");
     assert.equal(h.startup.registered, true); assert.equal(h.startup.startedAt, null);
     assert.equal(h.startup.serviceRecovery.failure?.kind, kind);
+    if (kind === "unavailable") {
+      assert.equal(h.state.setError, "The AI service is temporarily unavailable. Please try again. If the problem continues, contact support.");
+    }
     assert.equal(h.startup.messages.length, 0); assert.equal(h.events.capture, 0);
     assert.equal(h.context.usedMockModeDuringSessionRef.current, null);
     await h.run("completeSessionAndScore");
@@ -249,6 +252,61 @@ test("startup opening retry preserves registration and never commits a duplicate
   assert.equal(h.startup.messages.length, 1); assert.equal(h.events.capture, 1);
 });
 
+for (const platform of ["android", "ios"] as const) {
+  test(`${platform} initial unavailable opening shows startup copy and explicit retry reuses one registration`, async () => {
+    const options = { platform, openingError: failure(503, "ai_unavailable", "PRIVATE_PROVIDER_DETAIL") as Error | undefined };
+    const h = screenHarness(options);
+    const register = h.context.startSimulationSession;
+    h.context.startSimulationSession = (userId: string, input: { simulationSessionId: string }) => {
+      assert.equal(userId, "learner"); assert.equal(input.simulationSessionId, "same-session");
+      return register();
+    };
+    await h.run("startSession");
+    assert.equal(h.state.setError, "The AI service is temporarily unavailable. Please try again. If the problem continues, contact support.");
+    assert.doesNotMatch(h.state.setError, /last response|PRIVATE_PROVIDER_DETAIL/);
+    assert.equal(h.state.setMode, "idle"); assert.equal(h.state.setIsStartingSession, false);
+    assert.equal(h.context.startSimulationInProgressRef.current, false);
+    assert.equal(h.startup.serviceRecovery.failure?.retry, "start");
+    assert.equal(h.startup.registered, true, "00:00 does not mean registration failed");
+    assert.equal(h.startup.startedAt, null); assert.equal(h.startup.messages.length, 0);
+    assert.equal(h.events.capture, 0); assert.equal(h.events.completions.length, 0);
+    assert.deepEqual(recovery.getSimulationCompletionPolicy({ conversationStarted: false, usedMockMode: false }),
+      { recordUsage: false, requestScore: false });
+    assert.equal(h.events.openings, 1, "no automatic opening retry");
+    options.openingError = undefined;
+    await Promise.all([h.run("startSession"), h.run("startSession")]);
+    assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 2);
+    assert.equal(h.startup.messages.length, 1); assert.equal(h.events.capture, 1);
+    assert.equal(h.state.setError, null); assert.equal(h.startup.serviceRecovery.failure, null);
+  });
+}
+
+for (const outcome of ["success", "failure"] as const) {
+  test(`late opening ${outcome} cannot overwrite a newer screen generation`, async () => {
+    const h = screenHarness({ platform: "android" });
+    h.context.isStartupGenerationCurrent = (generation: number) => h.run("isStartupGenerationCurrent", generation);
+    let resolve!: (payload: unknown) => void;
+    let reject!: (error: Error) => void;
+    h.context.createOpeningLine = () => {
+      h.events.openings++;
+      return new Promise((yes, no) => { resolve = yes; reject = no; });
+    };
+    const start = h.run("startSession"); await flush();
+    assert.equal(h.startup.registered, true); assert.equal(h.events.openings, 1);
+    // Navigation invalidates this screen; another startup attempt owns the UI now.
+    h.context.sessionLifecycleGenerationRef.current++;
+    h.context.startSimulationAttemptRef.current++;
+    const state = { ...h.state };
+    if (outcome === "success") resolve({ assistantText: "Late opening", trainingPackId: null, speechPrefetch: null });
+    else reject(failure(503, "ai_unavailable"));
+    await start;
+    assert.deepEqual(h.state, state); assert.equal(h.startup.messages.length, 0);
+    assert.equal(h.events.capture, 0); assert.equal(h.events.completions.length, 0);
+    assert.equal(h.context.pendingOpeningLineRef.current, null);
+    assert.equal(h.startup.registered, true, "a confirmed registration is not discarded");
+  });
+}
+
 test("release builds cannot opt into mocking, and an unconfigured release cannot start", async () => {
   for (const flag of [undefined, "true", "false"]) assert.equal(recovery.isDevelopmentSimulationMockEnabled(false, flag, false), false);
   assert.equal(recovery.isDevelopmentSimulationMockEnabled(true, undefined, false), false);
@@ -275,6 +333,7 @@ test("active service interruption stops audio and capture; only confirmed submit
   await h.run("pauseForServiceFailure", new TypeError("Network request failed"), "turn");
   assert.equal(h.events.stopped, 1); assert.equal(h.events.cancelled, 1);
   assert.equal(h.startup.serviceRecovery.failure?.retry, "submitted");
+  assert.equal(h.state.setError, "The AI service is temporarily unavailable. Your last response may not have been confirmed.");
   assert.equal(h.events.capture, 1, "failure must not restart capture automatically");
   let awaits = 0;
   h.context.awaitSubmittedSimulationTurnReply = async () => {

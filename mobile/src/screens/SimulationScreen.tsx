@@ -210,6 +210,9 @@ type SimulationPalette = {
   secondaryButtonBorder: string;
   secondaryButtonText: string;
   danger: string;
+  errorText: string;
+  errorBackground: string;
+  errorBorder: string;
   shadow: string;
 };
 
@@ -262,6 +265,9 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     secondaryButtonBorder: "rgba(158, 77, 77, 0.24)",
     secondaryButtonText: "#8d3c3c",
     danger: "#b64c4c",
+    errorText: "#b42318",
+    errorBackground: "#ffebe7",
+    errorBorder: "#dcaaa2",
     shadow: "#121813",
   },
   dark: {
@@ -312,6 +318,9 @@ const SIMULATION_PALETTES: Record<SimulationThemeVariant, SimulationPalette> = {
     secondaryButtonBorder: "rgba(255, 124, 124, 0.45)",
     secondaryButtonText: "#ffe4e4",
     danger: "#ff7c7c",
+    errorText: "#ff7c7c",
+    errorBackground: "#321e1d",
+    errorBorder: "#95504b",
     shadow: "#0f1510",
   },
 };
@@ -5573,14 +5582,18 @@ function createStyles(palette: SimulationPalette) {
     errorCard: {
       borderRadius: 12,
       borderWidth: 1,
-      borderColor: "rgba(255, 124, 124, 0.55)",
-      backgroundColor: "rgba(70, 20, 20, 0.58)",
+      borderColor: palette.errorBorder,
+      backgroundColor: palette.errorBackground,
       padding: 10,
       marginBottom: 10,
+      minWidth: 0,
+      maxWidth: "100%",
     },
     errorText: {
-      color: palette.danger,
+      color: palette.errorText,
       fontSize: 13,
+      lineHeight: 19,
+      flexShrink: 1,
     },
     warningCard: {
       borderRadius: 12,

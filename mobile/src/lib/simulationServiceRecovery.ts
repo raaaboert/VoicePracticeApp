@@ -31,7 +31,11 @@ export function createSimulationServiceRecovery() {
       const retry = !recoverable ? "none" : phase === "start" ? "start"
         : pendingSubmittedTurn ? "submitted" : phase === "transcription" ? "recording" : "none";
       if (phase === "turn" && !pendingSubmittedTurn) this.scoringBlocked = true;
-      this.failure = { ...description, retry };
+      this.failure = { ...description, retry,
+        message: phase === "start" && description.kind === "unavailable"
+          ? "The AI service is temporarily unavailable. Please try again. If the problem continues, contact support."
+          : description.message,
+      };
       return this.failure;
     },
     discardedSubmittedTurn() {
