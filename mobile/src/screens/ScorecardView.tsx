@@ -21,6 +21,7 @@ import { Difficulty, PersonaStyle, SimulationScorecard, SimulationScoringStatus 
 import { useMemo, useState } from "react";
 
 interface ScorecardViewProps {
+  theme: ScorecardTheme;
   title: string;
   segmentLabel: string;
   difficulty: Difficulty;
@@ -38,17 +39,27 @@ interface ScorecardViewProps {
   onBackToTopic?: () => void;
 }
 
-const COLORS = {
-  panel: "rgba(21, 30, 24, 0.86)",
-  border: "rgba(154, 174, 156, 0.26)",
-  text: "#eef4ec",
-  textMuted: "#aebdaf",
-  accent: "#8caf93",
-  success: "#4dd6a8",
-  warning: "#ffc25f",
-};
+// Supplied by the app's existing selected theme, including the surrounding background.
+interface ScorecardTheme {
+  panel: string;
+  border: string;
+  text: string;
+  textMuted: string;
+  accent: string;
+  success: string;
+  selectedCardBg: string;
+  ghostButtonBg: string;
+  inputBg: string;
+  menuOverlayBackdrop: string;
+  menuOverlayCardBg: string;
+  primaryButtonText: string;
+  warningBorder: string;
+  warningBg: string;
+  warningText: string;
+}
 
 export function ScorecardView({
+  theme,
   title,
   segmentLabel,
   difficulty,
@@ -62,6 +73,7 @@ export function ScorecardView({
   onBack,
   onBackToTopic,
 }: ScorecardViewProps) {
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [supportOpen, setSupportOpen] = useState(false);
@@ -77,9 +89,7 @@ export function ScorecardView({
   return (
     <View style={styles.fill}>
       <View style={styles.topRow}>
-        <View style={styles.spacer} />
-        <Text style={styles.topTitle}>Scorecard</Text>
-        <View style={styles.spacer} />
+        <Text accessibilityRole="header" style={styles.topTitle}>Scorecard</Text>
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
@@ -99,7 +109,7 @@ export function ScorecardView({
             accessibilityState={{ busy: true }}
             accessibilityLiveRegion="polite"
           >
-            <ActivityIndicator size="large" color={COLORS.accent} />
+            <ActivityIndicator size="large" color={theme.accent} />
             <Text style={styles.loadingTitle}>{viewModel.loadingTitle}</Text>
             <Text style={styles.loadingBody}>{viewModel.loadingBody}</Text>
           </View>
@@ -124,34 +134,48 @@ export function ScorecardView({
               <Text style={styles.scoreLabel}>Overall Score</Text>
               <Text style={styles.scoreValue}>{scorecard.overallScore}</Text>
               <Text style={styles.body}>out of 100</Text>
-              <Text style={styles.body}>
-                Communication {scorecard.communicationScore} | Outcome {scorecard.outcomeScore}
-              </Text>
-              <Text style={styles.body}>
-                {scorecard.completionLevel === "complete" ? "Complete" : scorecard.completionLevel === "partial" ? "Partial" : "Inconclusive"}
-                {" | "}
-                Objective achieved: {scorecard.objectiveAchieved ? "Yes" : "No"}
-              </Text>
+              <View style={styles.scoreBreakdown}>
+                {[
+                  { label: "Communication", value: scorecard.communicationScore },
+                  { label: "Outcome", value: scorecard.outcomeScore },
+                ].map((metric) => <View key={metric.label} style={styles.scoreMetric} accessible
+                  accessibilityLabel={`${metric.label} score: ${metric.value} out of 100`}>
+                  <Text style={styles.scoreMetricLabel}>{metric.label}</Text>
+                  <Text style={styles.scoreMetricValue}>{metric.value}<Text style={styles.scoreScale}> / 100</Text></Text>
+                </View>)}
+              </View>
+              <View style={styles.completionRow}>
+                <View style={styles.completionItem}>
+                  <Text style={styles.body}>Completion</Text>
+                  <Text style={styles.completionValue}>
+                    {scorecard.completionLevel === "complete" ? "Complete" : scorecard.completionLevel === "partial" ? "Partial" : "Inconclusive"}
+                  </Text>
+                </View>
+                <View style={styles.completionItem}>
+                  <Text style={styles.body}>Objective achieved</Text>
+                  <Text style={styles.completionValue}>{scorecard.objectiveAchieved ? "Yes" : "No"}</Text>
+                </View>
+              </View>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.label}>Legacy Rubric Categories</Text>
+              <Text style={styles.label}>Skill Breakdown</Text>
               <Text style={styles.body}>
-                These four category scores are kept for compatibility with earlier scorecards.
+                See how you performed across key communication skills. Ratings are out of 10.
               </Text>
-            </View>
 
-            {[
-              { label: "Persuasion", value: scorecard.persuasion },
-              { label: "Clarity", value: scorecard.clarity },
-              { label: "Empathy", value: scorecard.empathy },
-              { label: "Assertiveness", value: scorecard.assertiveness },
-            ].map((metric) => (
-              <View key={metric.label} style={styles.card}>
-                <Text style={styles.metricLabel}>{metric.label}</Text>
-                <Text style={styles.metricValue}>{metric.value}/10</Text>
-              </View>
-            ))}
+              {[
+                { label: "Persuasion", value: scorecard.persuasion },
+                { label: "Clarity", value: scorecard.clarity },
+                { label: "Empathy", value: scorecard.empathy },
+                { label: "Assertiveness", value: scorecard.assertiveness },
+              ].map((metric) => (
+                <View key={metric.label} style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>{metric.label}</Text>
+                  <Text style={styles.metricValue}>{metric.value}/10</Text>
+                </View>
+              ))}
+            </View>
 
             <View style={styles.card}>
               <Text style={styles.label}>Strengths</Text>
@@ -277,7 +301,7 @@ export function ScorecardView({
               onChangeText={setSupportMessage}
               editable={!supportBusy}
               placeholder="Type your message..."
-              placeholderTextColor={COLORS.textMuted}
+              placeholderTextColor={theme.textMuted}
               multiline
             />
 
@@ -347,54 +371,57 @@ export function ScorecardView({
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: ScorecardTheme) => StyleSheet.create({
   fill: {
     flex: 1,
+    minHeight: 0,
+    minWidth: 0,
   },
   topRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "center",
     marginBottom: 12,
-  },
-  spacer: {
-    width: 76,
+    flexShrink: 0,
   },
   topTitle: {
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 19,
     fontWeight: "700",
+    flexShrink: 1,
+    textAlign: "center",
   },
   scroll: {
     flex: 1,
+    minHeight: 0,
   },
   scrollContent: {
-    paddingBottom: 14,
+    paddingBottom: 20,
   },
   card: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.panel,
+    borderColor: theme.border,
+    backgroundColor: theme.panel,
     padding: 15,
     marginBottom: 12,
     gap: 8,
   },
   loadingCard: {
     alignItems: "center",
-    borderColor: "rgba(140, 175, 147, 0.62)",
+    borderColor: theme.border,
     paddingVertical: 24,
     paddingHorizontal: 20,
   },
   loadingTitle: {
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 19,
     fontWeight: "800",
     lineHeight: 25,
     textAlign: "center",
   },
   loadingBody: {
-    color: COLORS.textMuted,
+    color: theme.textMuted,
     fontSize: 14.5,
     lineHeight: 21,
     textAlign: "center",
@@ -402,18 +429,18 @@ const styles = StyleSheet.create({
   warningCard: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "rgba(255, 194, 95, 0.5)",
-    backgroundColor: "rgba(69, 49, 14, 0.48)",
+    borderColor: theme.warningBorder,
+    backgroundColor: theme.warningBg,
     padding: 14,
     marginBottom: 10,
   },
   warningText: {
-    color: COLORS.warning,
+    color: theme.warningText,
     fontSize: 13.5,
     lineHeight: 20,
   },
   warningTitle: {
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 16,
     fontWeight: "700",
     lineHeight: 21,
@@ -422,58 +449,129 @@ const styles = StyleSheet.create({
   scoreCard: {
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: "rgba(77, 214, 168, 0.45)",
-    backgroundColor: "rgba(14, 49, 44, 0.75)",
-    paddingVertical: 22,
+    borderColor: theme.border,
+    backgroundColor: theme.selectedCardBg,
+    padding: 16,
     alignItems: "center",
     marginBottom: 12,
   },
   scoreLabel: {
-    color: COLORS.success,
+    color: theme.success,
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.7,
   },
   scoreValue: {
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 54,
     fontWeight: "800",
     lineHeight: 58,
   },
+  scoreBreakdown: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 14,
+  },
+  scoreMetric: {
+    flexBasis: 120,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    borderRadius: 10,
+    backgroundColor: theme.panel,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: 12,
+    gap: 4,
+  },
+  scoreMetricLabel: {
+    color: theme.textMuted,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  scoreMetricValue: {
+    color: theme.text,
+    fontSize: 24,
+    fontWeight: "800",
+  },
+  scoreScale: {
+    color: theme.textMuted,
+    fontSize: 13,
+    fontWeight: "400",
+  },
+  completionRow: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    borderTopWidth: 1,
+    borderTopColor: theme.border,
+    marginTop: 14,
+    paddingTop: 12,
+    gap: 12,
+  },
+  completionItem: {
+    flexBasis: 120,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    gap: 4,
+  },
+  completionValue: {
+    color: theme.text,
+    fontSize: 15,
+    fontWeight: "700",
+  },
   title: {
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 22,
     fontWeight: "700",
     lineHeight: 28,
   },
   label: {
-    color: COLORS.accent,
+    color: theme.accent,
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.6,
   },
   body: {
-    color: COLORS.textMuted,
+    color: theme.textMuted,
     fontSize: 14.5,
     lineHeight: 21,
   },
+  metricRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: theme.border,
+    paddingVertical: 6,
+  },
   metricLabel: {
-    color: COLORS.text,
+    flexBasis: 120,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    color: theme.text,
     fontSize: 14,
     fontWeight: "700",
   },
   metricValue: {
-    color: COLORS.accent,
+    color: theme.accent,
     fontSize: 20,
     fontWeight: "700",
+    flexShrink: 0,
   },
   footer: {
+    flexShrink: 0,
     marginTop: 0,
     paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: "rgba(154, 174, 156, 0.2)",
+    borderTopColor: theme.border,
   },
   secondaryButton: {
     minHeight: 50,
@@ -481,12 +579,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: "rgba(27, 39, 31, 0.68)",
+    borderColor: theme.border,
+    backgroundColor: theme.ghostButtonBg,
     paddingHorizontal: 12,
   },
   secondaryButtonText: {
-    color: COLORS.text,
+    color: theme.text,
     fontWeight: "800",
     fontSize: 14.5,
     textAlign: "center",
@@ -496,12 +594,15 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: COLORS.accent,
+    backgroundColor: theme.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
   },
   buttonText: {
-    color: "#102017",
+    color: theme.primaryButtonText,
     fontWeight: "800",
     fontSize: 16,
+    textAlign: "center",
   },
   buttonDisabled: {
     opacity: 0.55,
@@ -518,7 +619,7 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: "rgba(5, 10, 18, 0.76)",
+    backgroundColor: theme.menuOverlayBackdrop,
   },
   modalCard: {
     width: "100%",
@@ -526,8 +627,8 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: "rgba(16, 26, 20, 0.97)",
+    borderColor: theme.border,
+    backgroundColor: theme.menuOverlayCardBg,
     overflow: "hidden",
   },
   modalHeaderRow: {
@@ -539,24 +640,24 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(154, 174, 156, 0.2)",
+    borderBottomColor: theme.border,
   },
   modalTitle: {
     flex: 1,
-    color: COLORS.text,
+    color: theme.text,
     fontSize: 16,
     fontWeight: "800",
   },
   modalCloseButton: {
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: theme.border,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    backgroundColor: "rgba(27, 39, 31, 0.68)",
+    backgroundColor: theme.ghostButtonBg,
   },
   modalCloseButtonText: {
-    color: COLORS.text,
+    color: theme.text,
     fontWeight: "800",
     fontSize: 12.5,
   },
@@ -579,9 +680,9 @@ const styles = StyleSheet.create({
   input: {
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: "rgba(14, 23, 18, 0.82)",
-    color: COLORS.text,
+    borderColor: theme.border,
+    backgroundColor: theme.inputBg,
+    color: theme.text,
     minHeight: 110,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -597,24 +698,24 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: "rgba(14, 23, 18, 0.82)",
+    borderColor: theme.border,
+    backgroundColor: theme.inputBg,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 2,
   },
   checkboxChecked: {
-    backgroundColor: COLORS.accent,
-    borderColor: COLORS.accent,
+    backgroundColor: theme.accent,
+    borderColor: theme.accent,
   },
   checkboxMark: {
-    color: "#102017",
+    color: theme.primaryButtonText,
     fontWeight: "900",
     fontSize: 14,
     marginTop: -1,
   },
   successText: {
-    color: COLORS.success,
+    color: theme.success,
     fontSize: 13.5,
     lineHeight: 20,
   },
