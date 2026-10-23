@@ -643,6 +643,7 @@ export function SimulationScreen({
   const activeAssistantSpeechRef = useRef<ActiveAssistantSpeech | null>(null);
   const lifecycleResumeIntentRef = useRef<SimulationLifecycleResumeIntent | null>(null);
   const lifecycleResumeInProgressRef = useRef(false);
+  const lifecycleResumeOwnerRef = useRef<object | null>(null);
   const activeTurnSettlementRef = useRef<Promise<void> | null>(null);
   const pendingUnifiedTurnRecoveryRef = useRef<PendingUnifiedTurnRecovery | null>(null);
   const activeSubmittedTurnRecoveryRef = useRef<Promise<void> | null>(null);
@@ -3850,6 +3851,7 @@ export function SimulationScreen({
     recordingStartInProgressRef.current = false;
     recordingPrepareInProgressRef.current = false;
     lifecycleResumeInProgressRef.current = false;
+    lifecycleResumeOwnerRef.current = null;
     lifecycleResumeIntentRef.current = null;
     activeAssistantSpeechRef.current = null;
     pendingUnifiedTurnRecoveryRef.current = null;
@@ -4188,6 +4190,8 @@ export function SimulationScreen({
       return;
     }
 
+    const resumeOwner = {};
+    lifecycleResumeOwnerRef.current = resumeOwner;
     lifecycleResumeInProgressRef.current = true;
     const resumeReason = lifecyclePauseReasonRef.current;
     setIsResumingLifecyclePause(true);
@@ -4357,9 +4361,13 @@ export function SimulationScreen({
       }
       await startListeningTurn();
     } finally {
-      lifecycleResumeInProgressRef.current = false;
-      if (isSessionGenerationCurrent(sessionLifecycleGeneration)) {
-        setIsResumingLifecyclePause(false);
+      // Lifecycle generations gate side effects; ownership gates lock/busy cleanup.
+      if (lifecycleResumeOwnerRef.current === resumeOwner) {
+        lifecycleResumeOwnerRef.current = null;
+        lifecycleResumeInProgressRef.current = false;
+        if (!unmountedRef.current) {
+          setIsResumingLifecyclePause(false);
+        }
       }
     }
   };
@@ -4559,6 +4567,7 @@ export function SimulationScreen({
       recordingPrepareInProgressRef.current = false;
       setIsStartingTurn(false);
       lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeOwnerRef.current = null;
       lifecycleResumeIntentRef.current = null;
       activeAssistantSpeechRef.current = null;
       activeTurnSettlementRef.current = null;
@@ -4635,6 +4644,7 @@ export function SimulationScreen({
       recordingPrepareInProgressRef.current = false;
       recordingStartInProgressRef.current = false;
       lifecycleResumeInProgressRef.current = false;
+      lifecycleResumeOwnerRef.current = null;
       lifecycleResumeIntentRef.current = null;
       activeAssistantSpeechRef.current = null;
       activeTurnSettlementRef.current = null;
@@ -5089,7 +5099,7 @@ export function SimulationScreen({
                     useCompactTranscript ? styles.messageBubbleCompact : null,
                     message.role === "user" ? styles.userBubble : styles.aiBubble,
                     messageWidthConstraints
-                      ? { maxWidth: messageWidthConstraints.bubbleMaxWidth }
+                      ? { width: messageWidthConstraints.bubbleMaxWidth }
                       : null,
                   ]}
                 >
@@ -5109,7 +5119,7 @@ export function SimulationScreen({
                       useCompactTranscript ? styles.messageTextCompact : null,
                       message.role === "user" ? styles.userMessageText : styles.aiMessageText,
                       messageWidthConstraints
-                        ? { maxWidth: messageWidthConstraints.textMaxWidth }
+                        ? { width: messageWidthConstraints.textMaxWidth }
                         : null,
                     ]}
                   >
@@ -5750,7 +5760,7 @@ function createStyles(palette: SimulationPalette) {
       borderWidth: 1,
       paddingHorizontal: 13,
       paddingVertical: 11,
-      maxWidth: "92%",
+      width: "92%",
       gap: 4,
     },
     messageBubbleCompact: {
@@ -5787,11 +5797,12 @@ function createStyles(palette: SimulationPalette) {
     },
     messageText: {
       fontSize: 14.5,
-      lineHeight: 21,
+      // iOS height-rounding safeguard; native clipping still needs device validation.
+      lineHeight: Platform.OS === "ios" ? 21.001 : 21,
     },
     messageTextCompact: {
       fontSize: 13.5,
-      lineHeight: 19,
+      lineHeight: Platform.OS === "ios" ? 19.001 : 19,
     },
     userMessageText: {
       color: "#f8f0df",

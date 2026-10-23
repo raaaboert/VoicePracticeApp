@@ -13,8 +13,8 @@ assert.ok(paletteStatement); assert.ok(stylesFunction);
 const code = ts.transpileModule(`${paletteStatement.getText(ast)}\n${stylesFunction.getText(ast)}`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const { palettes, styles } = new Function("StyleSheet", `${code}; return { palettes: SIMULATION_PALETTES, styles: createStyles };`)(
-  { create: (value: unknown) => value },
+const { palettes, styles } = new Function("StyleSheet", "Platform", `${code}; return { palettes: SIMULATION_PALETTES, styles: createStyles };`)(
+  { create: (value: unknown) => value }, { OS: "ios" },
 );
 
 function luminance(hex: string): number {

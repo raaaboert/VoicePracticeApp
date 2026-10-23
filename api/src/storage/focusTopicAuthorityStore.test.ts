@@ -5,7 +5,14 @@ import {
   createFocusTopicAuthorityStore,
   isDuplicateActiveFocusTopicAssignmentError,
   isDuplicateActiveFocusTopicContentAttachmentError,
+  isDuplicateActiveFocusTopicScenarioAttachmentError,
 } from "./focusTopicAuthorityStore.js";
+
+test("scenario duplicate feedback classifies only its active relationship constraint", () => {
+  assert.equal(isDuplicateActiveFocusTopicScenarioAttachmentError({ code: "23505", constraint: "focus_topic_scenario_attachments_active_uidx" }), true);
+  assert.equal(isDuplicateActiveFocusTopicScenarioAttachmentError({ code: "23505", constraint: "other_uidx" }), false);
+  assert.equal(isDuplicateActiveFocusTopicScenarioAttachmentError({ code: "40001", constraint: "focus_topic_scenario_attachments_active_uidx" }), false);
+});
 
 test("duplicate active assignment classifier accepts only the two known PostgreSQL constraints", () => {
   assert.equal(isDuplicateActiveFocusTopicAssignmentError({ code: "23505",

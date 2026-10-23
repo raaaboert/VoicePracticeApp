@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { AppConfig, OrgCustomScenario, OrgStandardScenarioDivisionListResponse, OrgTrainingSummary } from "@voicepractice/shared";
+import type { AppConfig, OrgTrainingSummary } from "@voicepractice/shared";
 import { adminFetch } from "../lib/api";
+import { FocusTopicScenarioAttachments } from "./FocusTopicScenarioAttachments";
 
 type Audience = "organization" | "managers_and_admins" | "manager_only" | "manager_with_team" | "individual";
 type Assignment = {
@@ -40,8 +41,8 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [contentItems, setContentItems] = useState<ContentItem[]>([]);
-  const [scenarios, setScenarios] = useState<OrgCustomScenario[]>([]);
-  const [standards, setStandards] = useState<OrgStandardScenarioDivisionListResponse["rows"]>([]);
+  const [scenarioTitles, setScenarioTitles] = useState<Record<string, string>>({});
+  const [revision, setRevision] = useState(0);
   const [audience, setAudience] = useState<Audience>("organization");
   const [subjectUserId, setSubjectUserId] = useState("");
   const [kind, setKind] = useState<"standard" | "org" | "content">("standard");
@@ -83,12 +84,9 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
     const request = ++catalogSequence.current;
     setCatalogError(null);
     try {
-      const [custom, standard] = await Promise.all([
-        adminFetch<{ scenarios: OrgCustomScenario[] }>(`/orgs/${encodeURIComponent(orgId)}/custom-scenarios`),
-        adminFetch<OrgStandardScenarioDivisionListResponse>(`/orgs/${encodeURIComponent(orgId)}/standard-scenarios/divisions`),
-      ]);
+      const catalog = await adminFetch<{ attached: Array<{ scenario: { id: string; kind: string; title: string } }>; history: Array<{ scenario: { id: string; kind: string; title: string } }> }>(`${base}/scenario-options`);
       if (!mounted.current || request !== catalogSequence.current) return;
-      setScenarios(custom.scenarios); setStandards(standard.rows);
+      setScenarioTitles(Object.fromEntries([...catalog.attached, ...catalog.history].map(row => [`${row.scenario.kind}/${row.scenario.id}`, row.scenario.title])));
     } catch (caught) { if (mounted.current && request === catalogSequence.current) setCatalogError(caught instanceof Error ? caught.message : "Scenario names could not be loaded."); }
   };
   useEffect(() => {
@@ -97,12 +95,17 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
     return () => { mounted.current = false; sequence.current += 1; catalogSequence.current += 1; };
     // Topic keys remount this card, isolating requests, forms and disclosures.
   }, [base]);
-  useEffect(() => { if (view === "content" || view === "history") void loadCatalogs(); }, [base, view]);
+  useEffect(() => {
+    if (view === "history") {
+      void loadCatalogs();
+      void refresh().catch(caught => { if (mounted.current) setError(caught instanceof Error ? caught.message : "Could not load history."); });
+    }
+  }, [base, view]);
 
   const run = async (operation: () => Promise<unknown>, message: string) => {
     if (busy) return;
     setBusy(true); setError(null); setNotice(null);
-    try { await operation(); if (!mounted.current) return; await refresh(); if (mounted.current) setNotice(message); }
+    try { await operation(); if (!mounted.current) return; await refresh(); if (mounted.current) { setNotice(message); setRevision(value => value + 1); } }
     catch (caught) {
       // A retry/duplicate may already have changed relationships; always re-read current state.
       try { if (mounted.current) await refresh(); } catch { /* Preserve the original action error. */ }
@@ -113,15 +116,8 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
     ...contentItems.map((item) => ({ id: item.id, kind: "content" as const, title: item.title,
       detail: [item.contentType, item.publicationState, item.archivedAt ? "Archived" : "", item.description].filter(Boolean).join(" | "),
       available: item.availableToAttach && !item.archivedAt, attached: activeAttachments.some((row) => row.contentId === item.id) })),
-    ...scenarios.map((item) => ({ id: item.id, kind: "org" as const, title: item.title,
-      detail: ["Organization scenario", item.enabled ? "Active" : "Inactive", config?.segments.find((role) => role.id === item.segmentId)?.label,
-        ...(item.applicableIndustryIds ?? []).map((id) => config?.industries.find((industry) => industry.id === id)?.label ?? id)].filter(Boolean).join(" | "),
-      available: item.enabled === true, attached: activeAttachments.some((row) => row.scenarioKind === "org" && row.scenarioId === item.id) })),
-    ...standards.map((item) => ({ id: item.scenarioId, kind: "standard" as const, title: item.title,
-      detail: ["Standard scenario", item.segmentLabel, item.enabled ? "Enabled" : "Disabled"].join(" | "),
-      available: item.enabled, attached: activeAttachments.some((row) => row.scenarioKind === "standard" && row.scenarioId === item.scenarioId) })),
   ];
-  const attachmentName = (row: Attachment) => options.find((option) => option.id === (row.contentId ?? row.scenarioId)
+  const attachmentName = (row: Attachment) => (row.scenarioId ? scenarioTitles[`${row.scenarioKind}/${row.scenarioId}`] : null) ?? options.find((option) => option.id === (row.contentId ?? row.scenarioId)
     && option.kind === (row.contentId ? "content" : row.scenarioKind))?.title ?? "Historical or unavailable item";
   const assignmentName = (row: Assignment) => [AUDIENCES.find((option) => option.value === row.audience)?.label ?? row.audience,
     row.subjectUserId ? users.find((user) => user.userId === row.subjectUserId)?.email ?? "Former member" : null].filter(Boolean).join(" | ");
@@ -137,7 +133,7 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
     }}>Revoke</button> : null}
   </li>)}</ul> : <p className="small">{history ? "No revoked records." : "No active records."}</p>;
   const attachmentRows = (rows: Attachment[], history = false) => rows.length ? <ul className="topic-compact-list">{rows.map((row) => <li key={row.id}>
-    <div><strong>{attachmentName(row)}</strong><div className="small">{row.contentId ? "Learning material" : `${row.scenarioKind} scenario`}
+    <div><strong>{attachmentName(row)}</strong><div className="small">{row.contentId ? contentItems.find(item => item.id === row.contentId)?.contentType ?? "Learning Resource" : `${row.scenarioKind} scenario`}
       {history ? ` | Detached ${date(row.detachedAt)}` : " | Attached"}</div>
       <details><summary>Relationship details</summary><div className="small">Item ID: {row.contentId ?? row.scenarioId}<br />Relationship ID: {row.id}
         <br />Attached: {date(row.attachedAt ?? row.createdAt)} by {row.attachedBy ?? row.createdBy ?? "Not recorded"}
@@ -179,19 +175,20 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
       </details>
     </section>
     <section className="card" id="topic-workspace-panel-content" role="tabpanel" aria-labelledby="topic-workspace-tab-content" hidden={view !== "content"}>
-      <h3>Direct content attachments ({activeAttachments.length})</h3>
-      <p className="small">{activeAttachments.filter((row) => row.scenarioId).length} direct scenarios | {activeAttachments.filter((row) => row.contentId).length} learning materials. These are separate from legacy ownership counts.</p>
-      {attachmentRows(activeAttachments)}
-      <h4>Attach an existing item</h4>
-      <label htmlFor="topic-attachment-search">Search authorized scenarios and learning materials</label>
-      <input id="topic-attachment-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, type, role or industry" />
-      {catalogError ? <p className="error" role="alert">{catalogError} <button type="button" onClick={() => void loadCatalogs()}>Retry scenario catalog</button></p> : null}
+      <FocusTopicScenarioAttachments key={`${orgId}/${topic.id}`} orgId={orgId} topicId={topic.id} active={view === "content"} revision={revision} />
+      <h3>Learning Resources ({activeAttachments.filter(row => row.contentId).length})</h3>
+      <p className="small">Learning Resources are separate from Practice Scenarios.</p>
+      {attachmentRows(activeAttachments.filter(row => row.contentId))}
+      <h4>Attach a Learning Resource</h4>
+      <label htmlFor="topic-attachment-search">Search authorized Learning Resources</label>
+      <input id="topic-attachment-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, type or description" />
+
       <ul className="topic-compact-list topic-attachment-options">{filterAttachmentOptions(options,search).map((option) => <li key={option.kind+option.id}>
         <div><strong>{option.title}</strong><p className="small">{option.detail}</p></div>
         <button type="button" disabled={busy || loading || topic.status === "archived" || option.attached || !option.available} onClick={() => void attach(option.kind,option.id)}>
           {option.attached ? "Already attached" : option.available ? "Attach" : "Unavailable"}</button>
       </li>)}</ul>
-      {filterAttachmentOptions(options,search).length === 0 ? <p className="small">{search.trim() ? "No authorized items match your search." : "No available items were returned by the authorized catalogs."}</p> : null}
+      {filterAttachmentOptions(options,search).length === 0 ? <p className="small">{search.trim() ? "No authorized Learning Resources match your search." : "No available Learning Resources were returned."}</p> : null}
       <details className="enterprise-subsection"><summary>Advanced: attach by ID</summary>
         <p className="small">For specialized support. Server organization, eligibility and lifecycle validation still apply.</p>
         <label htmlFor="topic-authority-kind">Item type</label><select id="topic-authority-kind" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}>
@@ -201,6 +198,7 @@ export function EnterpriseFocusTopicAuthorityCard({ orgId, topic, users, view = 
       </details>
     </section>
     <section className="card" id="topic-workspace-panel-history" role="tabpanel" aria-labelledby="topic-workspace-tab-history" hidden={view !== "history"}>
+      {catalogError ? <p className="error" role="alert">{catalogError} <button type="button" onClick={() => void loadCatalogs()}>Retry scenario names</button></p> : null}
       <h3>Topic relationship history</h3><p className="small">Existing revoked and detached records are retained. This is relationship history, not a complete metadata audit trail.</p>
       <details className="enterprise-subsection"><summary>Revoked learner assignments ({revoked.filter((row) => !row.grantsManagement).length})</summary>{assignmentRows(revoked.filter((row) => !row.grantsManagement),true)}</details>
       <details className="enterprise-subsection"><summary>Revoked management grants ({revoked.filter((row) => row.grantsManagement).length})</summary>{assignmentRows(revoked.filter((row) => row.grantsManagement),true)}</details>

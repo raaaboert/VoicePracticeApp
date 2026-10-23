@@ -10,6 +10,16 @@ const styles = readFileSync(join(componentsDir, "../../app/globals.css"), "utf8"
 const page = readFileSync(join(componentsDir, "../../app/app/admin/focus-topics/page.tsx"), "utf8");
 const proxy = readFileSync(join(componentsDir, "../../app/api/admin/focus-topic-management/route.ts"), "utf8");
 
+test("existing attachments and authored lifecycle counts are separate and refresh after lifecycle changes", () => {
+  assert.match(source, /<FocusTopicScenarioAttachments key=\{`\$\{orgId\}\/\$\{selected.id\}`\}/);
+  assert.match(source, /revision=\{practiceScenarios\}/);
+  assert.match(source, /Create &amp; Review Scenarios/);
+  assert.match(source, /counts are separate from attached scenarios above/);
+  assert.match(source, /attachedScenarioCount\?\.orgId === orgId/);
+  for (const action of ["list_scenario_attachments", "attach_scenario", "detach_scenario"])
+    assert.ok(proxy.includes(`case "${action}"`));
+});
+
 test("Draft Topics explain restrictions beside Status and keep content controls disabled until Active is saved", () => {
   assert.match(source, /const topicIsDraft = selected\?\.status === "draft"/);
   assert.match(source, /const topicContentEnabled = selected\?\.status === "active"/);

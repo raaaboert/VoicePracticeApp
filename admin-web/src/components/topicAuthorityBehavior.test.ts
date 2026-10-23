@@ -93,11 +93,29 @@ test("attachment conflict is surfaced and re-reads server relationships without 
   const before=f.requests.filter(request=>request.path.endsWith("direct-attachments")).length;f.rejectAttach=true;
   button(nodes(tree,node=>node.props?.className==="topic-compact-list topic-attachment-options")[0],"Attach").props.onClick();await settle();tree=f.h.render();
   assert.ok(textOf(tree).includes("409"));assert.equal(f.requests.filter(request=>!request.init && request.path.endsWith("direct-attachments")).length,before+1);
-  assert.ok(textOf(panel(tree,"content")).includes("Direct content attachments (1)"));f.h.unmount();
+  assert.ok(textOf(panel(tree,"content")).includes("Learning Resources (1)"));f.h.unmount();
 });
 test("archived Topics disable assignment and attachment mutations, and search exposes an honest empty state",async()=>{
   const f=fixture();f.props.topic.status="archived";let tree=await loaded(f);assert.equal(button(tree,"Add assignment").props.disabled,true);
   f.props.view="content";tree=f.h.render();await settle();tree=f.h.render();
   nodes(tree,node=>node.props?.id==="topic-attachment-search")[0].props.onChange({target:{value:"not-found"}});tree=f.h.render();
-  assert.ok(textOf(tree).includes("No authorized items match"));assert.equal(button(tree,"Attach by ID").props.disabled,true);f.h.unmount();
+  assert.ok(textOf(tree).includes("No authorized Learning Resources match"));assert.equal(button(tree,"Attach by ID").props.disabled,true);f.h.unmount();
+});
+
+test("Content separates three scenario relationships from one Learning Resource without a combined attachment headline", async () => {
+  const h = workspaceHarness("./EnterpriseFocusTopicAuthorityCard.tsx", "EnterpriseFocusTopicAuthorityCard", {
+    orgId: "org-a", topic: { id: "topic-a", status: "active" }, users: [], view: "content",
+  }, async path => path.endsWith("assignments") ? { assignments: [] } : {
+    scenarios: Array.from({ length: 3 }, (_, i) => ({ id: `s${i}`, scenarioId: `scenario${i}`, scenarioKind: "org", detachedAt: null })),
+    content: [{ id: "c", contentId: "resource", detachedAt: null }],
+    contentItems: [{ id: "resource", title: "Cold call video", contentType: "video", publicationState: "published", availableToAttach: true, archivedAt: null }],
+  });
+  h.render(); await settle(); const tree = h.render(); const content = panel(tree, "content");
+  assert.ok(textOf(content).includes("Learning Resources (1)"));
+  assert.ok(!textOf(content).includes("4 attachments"));
+  assert.ok(!textOf(content).includes("Direct content attachments"));
+  const scenarios = nodes(content, node => node.type === "FocusTopicScenarioAttachments")[0];
+  assert.equal(scenarios.props.orgId, "org-a"); assert.equal(scenarios.props.topicId, "topic-a");
+  assert.equal(nodes(content, node => node.type === "li" && textOf(node).includes("org scenario")).length, 0);
+  assert.ok(textOf(content).includes("Search authorized Learning Resources")); h.unmount();
 });

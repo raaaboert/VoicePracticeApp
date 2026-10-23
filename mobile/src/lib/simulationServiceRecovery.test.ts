@@ -205,6 +205,167 @@ test("End during actual resumed speech releases audio; late player events cannot
 
 const failure = (status: number, code: string | null = null, message = "Safe service failure") => new errors.MobileApiError(message, status, code);
 
+function resumeAction(h: ReturnType<typeof screenHarness>) {
+  h.context.sessionActive = h.context.sessionActiveRef.current;
+  h.context.mode = h.state.setMode ?? "idle";
+  h.context.isStartingSession = h.state.setIsStartingSession ?? false;
+  h.context.isStartingTurn = h.state.setIsStartingTurn ?? false;
+  h.context.isResumingLifecyclePause = h.state.setIsResumingLifecyclePause ?? false;
+  h.context.lifecyclePauseActive = h.context.lifecyclePauseReasonRef.current !== null;
+  h.context.resolvedPrimaryAction = h.value("resolvedPrimaryAction");
+  return h.value("primaryAction");
+}
+
+test("resume ownership: interruption during resumed speech releases busy state and permits one saved-message replay", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession");
+  h.context.assertForegroundSessionGenerationCurrent = (g: number) => h.run("assertForegroundSessionGenerationCurrent", g);
+  const history = [...h.startup.messages]; const message = history[0];
+  h.context.appStateRef.current = "active";
+  h.context.activeAssistantSpeechRef.current = { message, committed: true };
+  await h.run("handleSimulationAppStateChange", "inactive");
+  await h.run("handleSimulationAppStateChange", "active");
+  const audio = attachActualSpeech(h);
+  const resume = h.run("resumeLifecyclePausedTurn"); await flush();
+  audio.sounds[0].emit({ playing: true });
+  await h.run("resumeLifecyclePausedTurn");
+  assert.equal(audio.fetches(), 1, "the lock prevents overlapping resume speech");
+  await h.run("handleSimulationAppStateChange", "inactive"); await resume;
+  await h.run("handleSimulationAppStateChange", "active");
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, false);
+  assert.equal(h.state.setIsResumingLifecyclePause, false);
+  assert.deepEqual(resumeAction(h), { kind: "start", label: "Resume Turn", disabled: false });
+  assert.equal(h.events.capture, 1, "interrupted speech cannot restart capture");
+  assert.equal(audio.sounds[0].removed, 1);
+  assert.deepEqual(h.startup.messages, history);
+
+  const retry = h.run("resumeLifecyclePausedTurn"); await flush();
+  const fresh = audio.sounds[1]; fresh.emit({ playing: true });
+  audio.sounds[0].emit({ playing: true, didJustFinish: true });
+  assert.equal(fresh.removed, 0); assert.equal(h.state.setIsResumingLifecyclePause, true);
+  fresh.emit({ playing: false, didJustFinish: true }); await retry;
+  assert.equal(audio.fetches(), 2, "one synthesis per explicit replay");
+  assert.equal(h.events.capture, 2); assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1);
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, false); assert.equal(h.state.setIsResumingLifecyclePause, false);
+  assert.equal(h.startup.messages[0], message); assert.deepEqual(h.startup.messages, history);
+});
+
+test("resume ownership: interruption during native microphone preparation cannot strand busy state or start stale capture", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession");
+  h.context.assertForegroundSessionGenerationCurrent = (g: number) => h.run("assertForegroundSessionGenerationCurrent", g);
+  const prepare = deferred<void>(), entered = deferred<void>();
+  class Recorder {
+    starts = 0; stops = 0; releases = 0; uri = "test-recording.m4a";
+    async prepareToRecordAsync() { if (recorders.indexOf(this) === 0) { entered.resolve(); await prepare.promise; } }
+    record() { this.starts++; }
+    async stop() { this.stops++; }
+    release() { this.releases++; }
+    constructor() { recorders.push(this); }
+  }
+  const recorders: Recorder[] = [];
+  h.context.AudioModule = { AudioRecorder: Recorder };
+  h.context.getSimulationAudioRecorderOptions = () => ({});
+  h.context.setAudioMode = async () => {};
+  h.context.setInterval = () => 1; h.context.STATUS_POLL_INTERVAL_MS = 350;
+  const stopRecorder = screenAst.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "stopAndReleaseRecorder")!;
+  h.context.stopAndReleaseRecorder = new Function(`${ts.transpileModule(stopRecorder.getText(screenAst), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText}; return stopAndReleaseRecorder;`)();
+  h.context.stopRecordingSafely = (reason: string) => h.run("stopRecordingSafely", reason);
+  h.context.startListeningTurn = () => h.run("startListeningTurn");
+  h.context.lifecyclePauseReasonRef.current = "background";
+  h.context.appStateRef.current = "active";
+  const history = [...h.startup.messages];
+  const resume = h.run("resumeLifecyclePausedTurn"); await entered.promise;
+  await h.run("handleSimulationAppStateChange", "inactive");
+  await h.run("handleSimulationAppStateChange", "active");
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, true, "pause must not release a pending resume lock");
+  assert.equal(h.state.setIsResumingLifecyclePause, true);
+  await h.run("resumeLifecyclePausedTurn"); assert.equal(recorders.length, 1);
+  prepare.resolve(); await resume;
+  assert.equal(recorders[0].starts, 0); assert.equal(recorders[0].stops, 1); assert.equal(recorders[0].releases, 1);
+  assert.equal(h.context.recordingRef.current, null);
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, false);
+  assert.equal(h.state.setIsResumingLifecyclePause, false);
+  assert.deepEqual(resumeAction(h), { kind: "start", label: "Resume Turn", disabled: false });
+  await h.run("resumeLifecyclePausedTurn");
+  assert.equal(recorders.length, 2); assert.equal(recorders[1].starts, 1);
+  assert.equal(h.context.recordingRef.current, recorders[1]);
+  assert.deepEqual(resumeAction(h), { kind: "submit", label: "Submit Response", disabled: false });
+  assert.deepEqual(h.startup.messages, history); assert.equal(h.events.openings, 1);
+  await h.run("endSession", false);
+  assert.equal(recorders[1].stops, 1); assert.equal(recorders[1].releases, 1);
+});
+
+test("resume ownership: TTS 504 then interrupted Retry AI Voice remains explicit and recoverable", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession");
+  h.context.assertForegroundSessionGenerationCurrent = (g: number) => h.run("assertForegroundSessionGenerationCurrent", g);
+  const audio = attachActualSpeech(h); const history = [...h.startup.messages]; const message = history[0];
+  h.context.lifecyclePauseReasonRef.current = "background";
+  h.context.lifecycleResumeIntentRef.current = { kind: "replay_assistant", assistantMessageId: message.id,
+    assistantText: message.content, assistantMessageCommitted: true };
+  h.context.appStateRef.current = "active";
+  audio.failFetch(failure(504, "ai_timeout"));
+  await h.run("resumeLifecyclePausedTurn"); await flush();
+  assert.equal(audio.fetches(), 1); assert.equal(audio.sounds.length, 0);
+  assert.deepEqual(resumeAction(h), { kind: "start", label: "Retry AI Voice", disabled: false });
+  assert.deepEqual(h.startup.messages, history); assert.equal(h.events.capture, 1);
+  // Clear only the mocked provider fault; production retry policy is unchanged.
+  (audio.failFetch as (error: Error | undefined) => void)(undefined);
+  const retry = h.run("resumeLifecyclePausedTurn"); await flush();
+  audio.sounds[0].emit({ playing: true });
+  await h.run("handleSimulationAppStateChange", "inactive"); await retry;
+  await h.run("handleSimulationAppStateChange", "active");
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, false);
+  assert.equal(h.state.setIsResumingLifecyclePause, false);
+  assert.deepEqual(resumeAction(h), { kind: "start", label: "Resume Turn", disabled: false });
+  await flush(); assert.equal(audio.fetches(), 2, "foreground/interruption must not automatically retry TTS");
+  assert.equal(h.events.capture, 1); assert.deepEqual(h.startup.messages, history);
+  const finalReplay = h.run("resumeLifecyclePausedTurn"); await flush();
+  audio.sounds[1].emit({ playing: true }); audio.sounds[1].emit({ playing: false, didJustFinish: true }); await finalReplay;
+  assert.equal(audio.fetches(), 3); assert.equal(h.events.capture, 2);
+  assert.equal(h.events.registrations, 1); assert.equal(h.events.openings, 1);
+  assert.equal(h.startup.messages[0], message); assert.deepEqual(h.startup.messages, history);
+});
+
+test("resume ownership: force-reset old finally cannot release a replacement resume or its busy state", { timeout: 3_000 }, async () => {
+  const h = screenHarness(); await h.run("startSession");
+  h.context.assertForegroundSessionGenerationCurrent = (g: number) => h.run("assertForegroundSessionGenerationCurrent", g);
+  const oldGate = deferred<void>(), newGate = deferred<void>(), oldEntered = deferred<void>(), newEntered = deferred<void>();
+  let prepares = 0, replays = 0;
+  h.context.prepareIosPlaybackAudioMode = () => {
+    if (++prepares === 1) { oldEntered.resolve(); return oldGate.promise; }
+    newEntered.resolve(); return newGate.promise;
+  };
+  h.context.speakAssistantResponse = async (_text: string, _time: number, start: () => void) => { replays++; start(); };
+  const message = h.startup.messages[0];
+  h.context.lifecyclePauseReasonRef.current = "background";
+  h.context.lifecycleResumeIntentRef.current = { kind: "replay_assistant", assistantMessageId: message.id,
+    assistantText: message.content, assistantMessageCommitted: true };
+  const oldResume = h.run("resumeLifecyclePausedTurn"); await oldEntered.promise;
+  await h.run("endSession", false); // Actual force-reset path invalidates the old operation.
+  assert.equal(h.state.setIsResumingLifecyclePause, false); assert.equal(h.context.lifecycleResumeInProgressRef.current, false);
+  // Model initialization of a different, already-registered session in the same screen refs.
+  const replacement = createSimulationStartupCoordinator(); await replacement.register(async () => {});
+  replacement.messages.push({ id: "replacement-ai", role: "assistant", content: "Saved replacement response" });
+  h.context.startup = replacement; h.context.serviceRecoveryRef.current = replacement.serviceRecovery;
+  h.context.messagesRef.current = replacement.messages; h.context.config.simulationSessionId = "replacement-session";
+  h.context.sessionActiveRef.current = true; h.context.simulationClosedRef.current = false;
+  h.context.sessionLifecycleGenerationRef.current++;
+  h.context.lifecyclePauseReasonRef.current = "background";
+  h.context.lifecycleResumeIntentRef.current = { kind: "replay_assistant", assistantMessageId: "replacement-ai",
+    assistantText: "Saved replacement response", assistantMessageCommitted: true };
+  const currentResume = h.run("resumeLifecyclePausedTurn"); await newEntered.promise;
+  oldGate.resolve(); await oldResume;
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, true, "obsolete finally cannot unlock the current resume");
+  assert.equal(h.state.setIsResumingLifecyclePause, true);
+  assert.equal(replays, 0, "stale preparation cannot start AI playback");
+  assert.equal(h.events.capture, 1);
+  newGate.resolve(); await currentResume;
+  assert.equal(replays, 1); assert.equal(h.events.capture, 2);
+  assert.equal(h.context.lifecycleResumeInProgressRef.current, false); assert.equal(h.state.setIsResumingLifecyclePause, false);
+  assert.equal(replacement.messages.length, 1);
+});
+
 for (const [name, error, kind] of [
   ["401 authentication", failure(401), "auth"],
   ["429 daily allowance", failure(429, null, "User daily time allotment reached."), "allowance"],

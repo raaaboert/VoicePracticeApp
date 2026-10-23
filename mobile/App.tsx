@@ -7301,6 +7301,7 @@ export default function App() {
     if (screen === "scorecard" && lastCompletedConfig) {
       return (
         <ScorecardView
+          theme={theme}
           title={lastCompletedConfig.scenario.title}
           segmentLabel={lastCompletedConfig.segmentLabel}
           difficulty={lastCompletedConfig.difficulty}
