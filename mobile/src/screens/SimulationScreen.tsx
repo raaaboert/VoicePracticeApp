@@ -5799,11 +5799,12 @@ function createStyles(palette: SimulationPalette) {
     },
     messageText: {
       fontSize: 14.5,
-      lineHeight: 21,
+      // iOS height-rounding safeguard; native clipping still needs device validation.
+      lineHeight: Platform.OS === "ios" ? 21.001 : 21,
     },
     messageTextCompact: {
       fontSize: 13.5,
-      lineHeight: 19,
+      lineHeight: Platform.OS === "ios" ? 19.001 : 19,
     },
     userMessageText: {
       color: "#f8f0df",

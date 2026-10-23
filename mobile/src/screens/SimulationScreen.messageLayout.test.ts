@@ -43,9 +43,12 @@ assert.ok(paletteStatement); assert.ok(stylesFunction);
 const styleCode = ts.transpileModule(`${paletteStatement.getText(ast)}\n${stylesFunction.getText(ast)}`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const { palettes, createStyles } = new Function("StyleSheet", `${styleCode}; return { palettes: SIMULATION_PALETTES, createStyles };`)(
-  { create: (styles: unknown) => styles },
-);
+function loadStyles(platform: "ios" | "android") {
+  return new Function("StyleSheet", "Platform", `${styleCode}; return { palettes: SIMULATION_PALETTES, createStyles };`)(
+    { create: (styles: unknown) => styles }, { OS: platform },
+  );
+}
+const { palettes } = loadStyles("ios");
 
 let messageMap: ts.CallExpression | undefined;
 function findMessageMap(node: ts.Node) {
@@ -61,12 +64,13 @@ const renderCode = ts.transpileModule(`const render = () => (${messageMap.getTex
 const require = createRequire(import.meta.url);
 
 // Execute the real message JSX and styles. Native line measurement is not simulated.
-function renderMessages(params: { viewportWidth: number; compact: boolean; theme: "light" | "dark"; content: string }) {
+function renderMessages(params: { viewportWidth: number; compact: boolean; theme: "light" | "dark"; content: string; platform?: "ios" | "android" }) {
   const messages = Object.freeze([
     Object.freeze({ id: "user-turn", role: "user", content: params.content }),
     Object.freeze({ id: "ai-turn", role: "assistant", content: params.content }),
   ]);
   const constraints = getSimulationMessageWidthConstraints(params);
+  const { createStyles } = loadStyles(params.platform ?? "ios");
   const render = new Function("require", "exports", "View", "Text", "messages", "styles", "useCompactTranscript",
     "messageWidthConstraints", "normalizeTranscriptText", "liveDiagnostics", `${renderCode}; return render;`)(
     require, {}, "View", "Text", messages, createStyles(palettes[params.theme]), params.compact, constraints, normalizeTranscriptText, { enabled: false },
@@ -90,7 +94,7 @@ test("YOU and AI receive definite inner widths across phone/tablet sizes, compac
         assert.equal(body.props.onLayout, undefined, "disabled diagnostics add no native layout listener");
         assert.equal(body.props.onTextLayout, undefined, "disabled diagnostics add no text layout listener");
         assert.equal(body.props.ref, undefined, "disabled diagnostics attach no Text ref");
-        assert.equal(bodyStyle.lineHeight, compact ? 19 : 21, "live line height remains unchanged");
+        assert.equal(bodyStyle.lineHeight, compact ? 19.001 : 21.001, "iOS live body receives the height safeguard");
         assert.equal(role.props.children, index === 0 ? "You" : "AI");
         assert.equal(bubbleStyle.alignSelf, index === 0 ? "flex-end" : "flex-start");
         assert.equal(bubbleStyle.width, constraints.bubbleMaxWidth);
@@ -98,6 +102,22 @@ test("YOU and AI receive definite inner widths across phone/tablet sizes, compac
         assert.equal(bodyStyle.width + 2 * (bubbleStyle.paddingHorizontal + bubbleStyle.borderWidth), bubbleStyle.width);
         assert.ok(bubbleStyle.width <= (viewportWidth - (compact ? 26 : 32)) * 0.92);
         assert.equal(bubbleStyle.backgroundColor, index === 0 ? palettes[theme].userBubble : palettes[theme].aiBubble);
+      }
+    }
+  }
+});
+
+test("actual transcript JSX selects iOS-only body line heights across roles, layouts and themes", () => {
+  for (const platform of ["ios", "android"] as const) {
+    for (const compact of [false, true]) for (const theme of ["light", "dark"] as const) {
+      const { bubbles } = renderMessages({ platform, compact, theme, viewportWidth: 390, content: "First line.\nSecond line." });
+      const expectedHeight = platform === "ios" ? (compact ? 19.001 : 21.001) : (compact ? 19 : 21);
+      for (const bubble of bubbles) {
+        const [role, body] = bubble.props.children;
+        const bodyStyle = flatten(body.props.style);
+        assert.equal(bodyStyle.lineHeight, expectedHeight);
+        assert.equal(bodyStyle.fontSize, compact ? 13.5 : 14.5);
+        assert.equal(flatten(role.props.style).lineHeight, undefined, "role labels receive no safeguard");
       }
     }
   }
