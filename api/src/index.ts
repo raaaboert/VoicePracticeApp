@@ -1,4 +1,5 @@
 import "express-async-errors";
+import { listTopicScenarioManagement, topicScenarioOptions } from "./services/focusTopicScenarioManagement.js";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import crypto from "node:crypto";
@@ -302,6 +303,7 @@ import {
   createFocusTopicAuthorityStore,
   isDuplicateActiveFocusTopicAssignmentError,
   isDuplicateActiveFocusTopicContentAttachmentError,
+  isDuplicateActiveFocusTopicScenarioAttachmentError,
   type FocusTopicAuthorityStore,
   type FocusTopicAuthoritySnapshot,
 } from "./storage/focusTopicAuthorityStore.js";
@@ -18602,6 +18604,39 @@ app.delete(
 );
 
 app.get(
+  "/orgs/:orgId/trainings/:trainingId/scenario-options",
+  requireContentOrganizationAuth,
+  async (request: ContentOrganizationAuthRequest, response: Response) => {
+    if (runtimeConfig.focusTopicAuthority !== "assignments") {
+      response.status(409).json({ error: "Direct Focus Topic attachments are not active in this environment." });
+      return;
+    }
+    const search = typeof request.query.q === "string" ? request.query.q.trim() : "";
+    const page = request.query.page === undefined ? 1 : Number(request.query.page);
+    if (!Number.isSafeInteger(page) || page < 1 || search.length > 200) {
+      response.status(400).json({ error: "Use a positive page number and a search of at most 200 characters." });
+      return;
+    }
+    const result = await withFreshDatabaseSnapshotRead(async (db) => {
+      const management = await resolveFocusTopicManagementContext(
+        db, request, request.params.orgId, response, request.params.trainingId,
+      );
+      if (!management) return null;
+      const topic = findOrgTrainingRecord(db, management.org.id, request.params.trainingId);
+      if (!topic) {
+        response.status(404).json({ error: "Focus Topic not found." });
+        return null;
+      }
+      return listTopicScenarioManagement({ config: db.config, org: management.org, topicId: topic.id,
+        topicActive: topic.status === "active", topicStatus: topic.status,
+        authority: await focusTopicAuthorityStore.listSnapshot(management.org.id),
+        search, page, canManage: management.scope.canManageAllTopics && topic.status !== "archived" });
+    });
+    if (!response.headersSent && result) response.json(result);
+  },
+);
+
+app.get(
   "/orgs/:orgId/trainings/:trainingId/direct-attachments",
   requireContentOrganizationAuth,
   async (request: ContentOrganizationAuthRequest, response: Response) => {
@@ -19793,11 +19828,8 @@ app.post(
         if (!requireAllFocusTopicManagement(management, response)) return null;
         const scenarioKind = body.scenarioKind;
         const scenarioId = typeof body.scenarioId === "string" ? body.scenarioId.trim() : "";
-        const valid = scenarioKind === "standard"
-          ? listOrgVisibleStandardScenarios({ config: db.config, org }).some((scenario) =>
-              scenario.scenarioId === scenarioId && scenario.enabled)
-          : scenarioKind === "org" && (org.customScenarios ?? []).some((scenario) =>
-              scenario.id === scenarioId && scenario.enabled === true);
+        const valid = topicScenarioOptions(db.config, org).some(scenario =>
+          scenario.kind === scenarioKind && scenario.id === scenarioId && scenario.available);
         if (!scenarioId || !valid) {
           response.status(400).json({ error: "Scenario is not available in this organization." });
           return null;
@@ -19875,6 +19907,11 @@ app.post(
       emitMobileUpdateForOrg(db, org.id, "org");
       return row;
     }).catch((error: unknown) => {
+      if (isDuplicateActiveFocusTopicScenarioAttachmentError(error)) {
+        response.status(409).json({ error: "This scenario is already attached to the Focus Topic.",
+          code: "focus_topic_scenario_already_attached" });
+        return null;
+      }
       if (isDuplicateActiveFocusTopicContentAttachmentError(error)) {
         response.status(409).json({
           error: "This Learning Resource is already attached to the Focus Topic.",

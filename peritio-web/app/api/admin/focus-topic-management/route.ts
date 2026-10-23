@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import {
   assertDashboardAuthConfig,
+  listDashboardFocusTopicScenarioAttachments,
+  attachDashboardFocusTopicScenario,
   createDashboardCustomerPracticeScenario,
   generateDashboardCustomerPracticeScenario,
   attachDashboardFocusTopicContent,
@@ -36,6 +38,9 @@ import {
 } from "@/src/lib/dashboardApiProxy";
 
 type Action =
+  | { action: "list_scenario_attachments"; orgId: string; topicId: string; search?: string; page?: number }
+  | { action: "attach_scenario"; orgId: string; topicId: string; scenarioKind: "standard" | "org"; scenarioId: string }
+  | { action: "detach_scenario"; orgId: string; topicId: string; attachmentId: string }
   | { action: "create_topic"; orgId: string; name: string; description: string; status: string }
   | { action: "update_topic"; orgId: string; topicId: string; name?: string; description?: string; status?: string }
   | { action: "list_assignments"; orgId: string; topicId: string }
@@ -86,6 +91,12 @@ export async function POST(request: NextRequest) {
       return noStore(NextResponse.json({ error: "Organization is required." }, { status: 400 }));
     }
     switch (body.action) {
+      case "list_scenario_attachments":
+        return noStore(NextResponse.json(await listDashboardFocusTopicScenarioAttachments(body.orgId, body.topicId, body.search, body.page)));
+      case "attach_scenario":
+        return noStore(NextResponse.json(await attachDashboardFocusTopicScenario(body.orgId, body.topicId, body.scenarioKind, body.scenarioId), { status: 201 }));
+      case "detach_scenario":
+        return noStore(NextResponse.json(await detachDashboardFocusTopicContent(body.orgId, body.topicId, body.attachmentId)));
       case "create_topic":
         return noStore(NextResponse.json(await createDashboardFocusTopic(body.orgId, body), { status: 201 }));
       case "update_topic":

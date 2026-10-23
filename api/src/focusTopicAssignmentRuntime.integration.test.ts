@@ -720,6 +720,88 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         body?: Record<string, unknown>) => dashboardCall(scopedSessionToken, path, method, body);
       const orgAdminCall = (path: string, method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE" = "GET",
         body?: Record<string, unknown>) => dashboardCall(orgAdminSession.token, path, method, body);
+      await t.test("scenario attachment management is scoped, paginated, many-to-many and history-preserving", async () => {
+        const before = structuredClone(await storage.load());
+        const extraTopic = { ...topic, id: "scenario_management_second_topic" };
+        const currentOrg = before.orgs.find(row => row.id === org.id)!;
+        const original = currentOrg.customScenarios!.find(row => row.id === customScenarioId)!;
+        const candidates = Array.from({ length: 13 }, (_, i) => ({ ...original,
+          id: `management_scenario_${i}`, title: `Management candidate ${String(i).padStart(2, "0")}` }));
+        const disabled = { ...original, id: "management_disabled", title: "Disabled local management scenario", enabled: false };
+        const ineligible = { ...original, id: "management_ineligible", applicableIndustryIds: [] };
+        await storage.save({ ...before, orgTrainings: [...before.orgTrainings, extraTopic],
+          orgs: before.orgs.map(row => row.id === org.id ? { ...row,
+            customScenarios: [...(row.customScenarios ?? []), ...candidates, disabled, ineligible] }
+            : row.id === foreignOrg.id ? { ...row, customScenarios: [...(row.customScenarios ?? []),
+              { ...original, id: disabled.id, orgId: foreignOrg.id, enabled: true, title: "PRIVATE FOREIGN SAME ID" },
+              { ...original, id: "foreign_only_management", orgId: foreignOrg.id, title: "PRIVATE FOREIGN ONLY" }] } : row) });
+        const options = `/orgs/${org.id}/trainings/${topic.id}/scenario-options`;
+        const secondPath = `/orgs/${org.id}/trainings/${extraTopic.id}/direct-attachments`;
+        try {
+          // An existing disabled attachment stays manageable and is never replaced by a foreign same-ID definition.
+          await pool!.query(`INSERT INTO focus_topic_scenario_attachments
+            (id,org_id,topic_id,scenario_kind,scenario_id,attached_by,attached_at)
+            VALUES ('management_historical_disabled',$1,$2,'org',$3,'platform_admin',$4)`, [org.id, topic.id, disabled.id, now]);
+          const first = await orgAdminCall(`${options}?q=Management%20candidate`);
+          assert.equal(first.status, 200, JSON.stringify(first.body));
+          assert.equal(first.body.total, 13); assert.equal((first.body.items as unknown[]).length, 10);
+          assert.equal((first.body.attached as any[]).length, 3);
+          const historical = (first.body.attached as any[]).find(row => row.scenario.id === disabled.id);
+          assert.equal(historical.scenario.title, disabled.title); assert.equal(historical.scenario.available, false);
+          const second = await orgAdminCall(`${options}?q=management%20candidate&page=2`);
+          assert.equal(second.status, 200); assert.equal((second.body.items as unknown[]).length, 3);
+          assert.equal(JSON.stringify(first.body).includes("PRIVATE FOREIGN"), false);
+          assert.equal(JSON.stringify(first.body).includes("scoringGuidance"), false);
+          assert.equal((await orgAdminCall(`${options}?page=0`)).status, 400);
+          const archived = await orgAdminCall(`/orgs/${org.id}/trainings/${inactiveTopic.id}/scenario-options`);
+          assert.equal(archived.status, 200); assert.equal(archived.body.topicStatus, "archived");
+          assert.equal(archived.body.canManage, false);
+          assert.equal((await orgAdminCall(`/orgs/${foreignOrg.id}/trainings/${foreignTopic.id}/scenario-options`)).status, 404);
+          assert.equal((await scopedCall(`/orgs/${org.id}/trainings/${unmanagedTopic.id}/scenario-options`)).status, 404);
+          const scoped = await scopedCall(options);
+          assert.equal(scoped.status, 200); assert.equal(scoped.body.canManage, false);
+          assert.deepEqual(scoped.body.items, []);
+          const payload = { kind: "scenario", scenarioKind: "org", scenarioId: candidates[0].id };
+          assert.equal((await scopedCall(attachmentsPath, "POST", payload)).status, 403);
+          for (const scenarioId of [disabled.id, ineligible.id, "foreign_only_management"]) {
+            assert.equal((await orgAdminCall(attachmentsPath, "POST", { ...payload, scenarioId })).status, 400);
+          }
+          const attached = await orgAdminCall(attachmentsPath, "POST", payload);
+          assert.equal(attached.status, 201, JSON.stringify(attached.body));
+          const mobileWithAttachment = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+          assert.equal(mobileWithAttachment.status, 200);
+          assert.ok((mobileWithAttachment.body.scenarios as any[]).some(row => row.id === candidates[0].id));
+          assert.equal((mobileWithAttachment.body.scenarios as any[]).some(row => row.id === disabled.id), false);
+          const duplicate = await orgAdminCall(attachmentsPath, "POST", payload);
+          assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
+          assert.equal((await orgAdminCall(secondPath, "POST", payload)).status, 201);
+          assert.equal((await scopedCall(`${attachmentsPath}/${attached.body.id}`, "DELETE")).status, 403);
+          assert.equal((await orgAdminCall(`${attachmentsPath}/${attached.body.id}`, "DELETE")).status, 200);
+          const after = await orgAdminCall(options);
+          assert.equal((after.body.attached as any[]).some(row => row.scenario.id === payload.scenarioId), false);
+          assert.equal((after.body.history as any[]).some(row => row.id === attached.body.id && row.detachedAt), true);
+          const elsewhere = await orgAdminCall(`/orgs/${org.id}/trainings/${extraTopic.id}/scenario-options`);
+          assert.equal((elsewhere.body.attached as any[]).some(row => row.scenario.title === candidates[0].title), true);
+          assert.equal((await orgAdminCall(attachmentsPath, "POST", payload)).status, 201);
+          const concurrent = await Promise.all([orgAdminCall(attachmentsPath, "POST", { ...payload, scenarioId: candidates[1].id }),
+            orgAdminCall(attachmentsPath, "POST", { ...payload, scenarioId: candidates[1].id })]);
+          assert.deepEqual(concurrent.map(row => row.status).sort(), [201, 409]);
+          const latest = await orgAdminCall(options);
+          assert.equal((latest.body.attached as any[]).filter(row => row.scenario.id === payload.scenarioId).length, 1);
+          assert.ok((latest.body.attached as any[]).some(row => row.scenario.kind === "standard"));
+          assert.equal((latest.body.attached as any[]).some(row => row.scenario.id === contentId), false);
+          assert.equal((await storage.load()).orgs.find(row => row.id === org.id)!.customScenarios!
+            .some(row => row.id === candidates[0].id), true);
+          const lifecycle = await orgAdminCall(`/orgs/${org.id}/trainings/${topic.id}/practice-scenarios`);
+          assert.equal(lifecycle.status, 200); assert.deepEqual(lifecycle.body.scenarios, []);
+        } finally {
+          // Keep the enclosing harness's existing content-only audit totals independent.
+          await pool!.query(`DELETE FROM audit_events WHERE org_id=$1 AND metadata->>'attachmentId' IN
+            (SELECT id FROM focus_topic_scenario_attachments WHERE org_id=$1 AND scenario_id LIKE 'management_%')`, [org.id]);
+          await pool!.query("DELETE FROM focus_topic_scenario_attachments WHERE org_id=$1 AND scenario_id LIKE 'management_%'", [org.id]);
+          await storage.save(before);
+        }
+      });
       await t.test("library creation with a selected Topic persists a direct attachment on subsequent reads", async () => {
         const before = structuredClone(await storage.load());
         const selectedTopic = { ...topic, id: "library_creation_topic", name: "Library creation Topic" };
@@ -2113,6 +2195,21 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
         const v1 = await orgAdminCall(`${path}/publish`, "POST");
         assert.equal(v1.status, 200);
         await contains("published v1 visible", true);
+        const managementOptions = `/orgs/${org.id}/trainings/${topic.id}/scenario-options`;
+        const attachedPublished = ((await orgAdminCall(managementOptions)).body.attached as any[])
+          .find(row => row.scenario.id === id);
+        assert.equal(attachedPublished.scenario.lifecycleManaged, true);
+        assert.equal(attachedPublished.scenario.isHomeTopic, true);
+        const publicationBeforeDetach = ((await orgAdminCall(practiceScenarioPath)).body.scenarios as any[]).find(row => row.id === id);
+        const projectionBeforeDetach = (await storage.load()).orgs.find(row => row.id === org.id)!.customScenarios!.find(row => row.id === id);
+        assert.equal((await orgAdminCall(`${attachmentsPath}/${attachedPublished.id}`, "DELETE")).status, 200);
+        const publicationAfterDetach = ((await orgAdminCall(practiceScenarioPath)).body.scenarios as any[]).find(row => row.id === id);
+        assert.deepEqual(publicationAfterDetach, publicationBeforeDetach, "Detach preserves publication, immutable versions, approvals and history");
+        assert.deepEqual((await storage.load()).orgs.find(row => row.id === org.id)!.customScenarios!.find(row => row.id === id), projectionBeforeDetach);
+        const detachedTopic = await call(`/mobile/users/${user.id}/focus-topics/${topic.id}`);
+        assert.equal(detachedTopic.status, 200);
+        assert.equal((detachedTopic.body.scenarios as any[]).some(row => row.id === id), false);
+        assert.equal((await orgAdminCall(attachmentsPath, "POST", { kind: "scenario", scenarioKind: "org", scenarioId: id })).status, 201);
         const sessionId = `opening_window_${randomUUID()}`;
         const prompts: string[] = [];
         const capture = (request: string) => {

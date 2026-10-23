@@ -1089,6 +1089,23 @@ export async function getDashboardFocusTopicRelatedContent(orgId: string, topicI
   );
 }
 
+export async function listDashboardFocusTopicScenarioAttachments(orgId: string, topicId: string, search = "", page = 1) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  const query = new URLSearchParams({ q: search, page: String(page) });
+  return fetchDashboardApi<unknown>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/scenario-options?${query}`,
+    { token },
+  );
+}
+
+export async function attachDashboardFocusTopicScenario(orgId: string, topicId: string, scenarioKind: "standard" | "org", scenarioId: string) {
+  const token = requireDashboardApiToken(await getWebAuthBearerToken());
+  return fetchDashboardApi<unknown>(
+    `/orgs/${encodeURIComponent(orgId)}/trainings/${encodeURIComponent(topicId)}/direct-attachments`,
+    { method: "POST", body: JSON.stringify({ kind: "scenario", scenarioKind, scenarioId }), token },
+  );
+}
+
 export async function attachDashboardFocusTopicContent(orgId: string, topicId: string, contentId: string) {
   const token = requireDashboardApiToken(await getWebAuthBearerToken());
   return fetchDashboardApi<DashboardFocusTopicContentAttachment>(

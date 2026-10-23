@@ -43,6 +43,8 @@ export function workspaceHarness(file: string, exportName: string, props: any, f
     new Function("require", "exports", "window", "document", code)((id: string) => {
       if (id === "react") return react;
       if (id === "../lib/api") return { adminFetch: fetch };
+      if (id === "../lib/adminApiClient") return { fetchAdminApiJson: fetch };
+      if (id === "./FocusTopicScenarioAttachments") return { FocusTopicScenarioAttachments: "FocusTopicScenarioAttachments" };
       if (id === "./useTopicDraftGuard") return load("./useTopicDraftGuard.tsx");
       if (id === "./WorkspaceTabs") return load("./WorkspaceTabs.tsx");
       if (id.startsWith("./Enterprise")) return new Proxy({}, { get: (_target, key) => String(key) });

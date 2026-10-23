@@ -96,6 +96,13 @@ export function isDuplicateActiveFocusTopicContentAttachmentError(error: unknown
     && record.constraint === "org_content_topic_attachments_active_uidx";
 }
 
+export function isDuplicateActiveFocusTopicScenarioAttachmentError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as { code?: unknown; constraint?: unknown };
+  return record.code === "23505"
+    && record.constraint === "focus_topic_scenario_attachments_active_uidx";
+}
+
 type QueryPool = Pick<Pool, "query" | "connect">;
 
 export class FocusTopicBackfillValidationError extends Error {

@@ -1105,3 +1105,15 @@ td {
   .enterprise-search-field { min-width: 0; }
   .topic-compact-list > li { flex-wrap: wrap; }
 }
+
+/* Topic associations: compact lists with details behind native disclosures. */
+.topic-scenario-attachments { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; margin-bottom: 1.5rem; }
+.topic-scenario-copy { color: var(--vp-text-muted); font-size: .875rem; margin: .25rem 0; overflow-wrap: anywhere; }
+.topic-scenario-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; }
+.topic-scenario-list > li { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: .75rem; border: 1px solid var(--vp-border); border-radius: .75rem; }
+.topic-scenario-list > li > div { min-width: 0; overflow-wrap: anywhere; }
+.topic-scenario-list button { flex-shrink: 0; }
+.topic-scenario-paging { display: flex; gap: .5rem; flex-wrap: wrap; }
+@media (max-width: 600px) { .topic-scenario-list > li { flex-wrap: wrap; } }
+
+.topic-scenario-attachments input { width: 100%; min-width: 0; box-sizing: border-box; }

@@ -1,6 +1,7 @@
 "use client";
 
 import { buildScenarioGenerationRequest, generatedScenarioContextMatches } from "./practiceScenarioGenerationContext";
+import { FocusTopicScenarioAttachments } from "./FocusTopicScenarioAttachments";
 
 import { ChevronDown, ChevronUp, CircleHelp, LoaderCircle, TriangleAlert } from "lucide-react";
 import Link from "next/link";
@@ -147,6 +148,7 @@ export function FocusTopicAdministration({
   const [assignableLearnersError, setAssignableLearnersError] = useState<string | null>(null);
   const [related, setRelated] = useState<DashboardFocusTopicRelatedContentResponse | null>(null);
   const [practiceScenarios, setPracticeScenarios] = useState<CustomerPracticeScenarioListResponse | null>(null);
+  const [attachedScenarioCount, setAttachedScenarioCount] = useState<{ orgId: string; topicId: string; count: number } | null>(null);
   const [editingScenarioId, setEditingScenarioId] = useState<string | null>(null);
   const [scenarioTitle, setScenarioTitle] = useState("");
   const [scenarioDescription, setScenarioDescription] = useState("");
@@ -874,9 +876,13 @@ export function FocusTopicAdministration({
 
     {selected ? <FocusTopicWorkspaceSection key={`${selected.id}-practice`} headingId="focus-topic-practice-heading" eyebrow="Practice Scenarios"
       title="Practice Scenarios"
-      summary={`${orderedPracticeScenarios.length} scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
+      summary={`${attachedScenarioCount?.orgId === orgId && attachedScenarioCount.topicId === selected.id ? attachedScenarioCount.count : "…"} attached · ${orderedPracticeScenarios.length} authored scenarios · ${practiceScenarios?.scenarios.filter((scenario) => scenario.status === "in_review").length ?? 0} awaiting review`}
       description={topicIsDraft ? "Scenario generation from Related Content is unavailable while this Topic is Draft. Change it to Active and save."
-        : "Create reviewable scenario versions for this Topic. Learners receive only an explicitly published approved version."}>
+        : "Manage existing scenario attachments separately from scenario creation, review and publication."}>
+      <FocusTopicScenarioAttachments key={`${orgId}/${selected.id}`} orgId={orgId} topicId={selected.id}
+        revision={practiceScenarios} onCount={count => setAttachedScenarioCount({ orgId, topicId: selected.id, count })} />
+      <h3>Create &amp; Review Scenarios ({orderedPracticeScenarios.length})</h3>
+      <p className="muted-copy">Authored versions, reviews and publication history. These counts are separate from attached scenarios above and must not be added together.</p>
       {practiceScenarios && !practiceScenarios.permissions.creationEnabled
         ? <div className="notice" role="status">Customer Practice Scenario creation is not enabled for this organization. Existing scenarios remain visible.</div>
         : null}
