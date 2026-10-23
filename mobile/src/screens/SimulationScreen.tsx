@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLiveTranscriptDiagnostics } from "../diagnostics/useLiveTranscriptDiagnostics";
 import {
   AudioModule,
   requestRecordingPermissionsAsync,
@@ -469,7 +470,7 @@ export function SimulationScreen({
   onReviewRelatedLearningResources,
   onSessionComplete,
 }: SimulationScreenProps) {
-  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight, fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [mode, setMode] = useState<OrbMode>("thinking");
@@ -532,6 +533,10 @@ export function SimulationScreen({
       compact: useCompactTranscript,
     }),
     [chatViewportWidth, useCompactTranscript],
+  );
+  const liveDiagnostics = useLiveTranscriptDiagnostics(
+    `${config.simulationSessionId}:${userId}:${colorScheme}:${chatViewportWidth}:${useCompactTranscript}:${fontScale}`,
+    messages.slice(-12).map((message) => message.id), fontScale, themeVariant === "dark",
   );
   const shouldUseFastStartRemoteTts =
     config.remoteTtsEnabled &&
@@ -5034,7 +5039,7 @@ export function SimulationScreen({
           <View style={[styles.chatHeader, useCompactTranscript ? styles.chatHeaderCompact : null]}>
             <View>
               <Text style={[styles.chatEyebrow, useCompactTranscript ? styles.chatEyebrowCompact : null]}>Transcript</Text>
-              <Text style={[styles.chatTitle, useCompactTranscript ? styles.chatTitleCompact : null]}>Live turn history</Text>
+              <Text {...liveDiagnostics.titleProps} style={[styles.chatTitle, useCompactTranscript ? styles.chatTitleCompact : null]}>Live turn history</Text>
             </View>
             <View style={[styles.chatStatPill, useCompactTranscript ? styles.chatStatPillCompact : null]}>
               <Text style={[styles.chatStatText, useCompactTranscript ? styles.chatStatTextCompact : null]}>{transcriptCountLabel}</Text>
@@ -5104,6 +5109,7 @@ export function SimulationScreen({
                   </Text>
                   <Text
                     lineBreakStrategyIOS="standard"
+                    {...(liveDiagnostics.enabled ? liveDiagnostics.textProps(message.id) : {})}
                     style={[
                       styles.messageText,
                       useCompactTranscript ? styles.messageTextCompact : null,
@@ -5198,8 +5204,14 @@ export function SimulationScreen({
           ) : null}
         </View>
       </View>
+      {liveDiagnostics.panel}
     </View>
   );
+}
+
+// The isolated staging harness uses the real styles without changing the live renderer.
+export function getSimulationTranscriptStyles(colorScheme: AppColorScheme) {
+  return createStyles(SIMULATION_PALETTES[colorScheme === "soft_light" ? "light" : "dark"]);
 }
 
 function createStyles(palette: SimulationPalette) {

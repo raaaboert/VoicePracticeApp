@@ -68,8 +68,8 @@ function renderMessages(params: { viewportWidth: number; compact: boolean; theme
   ]);
   const constraints = getSimulationMessageWidthConstraints(params);
   const render = new Function("require", "exports", "View", "Text", "messages", "styles", "useCompactTranscript",
-    "messageWidthConstraints", "normalizeTranscriptText", `${renderCode}; return render;`)(
-    require, {}, "View", "Text", messages, createStyles(palettes[params.theme]), params.compact, constraints, normalizeTranscriptText,
+    "messageWidthConstraints", "normalizeTranscriptText", "liveDiagnostics", `${renderCode}; return render;`)(
+    require, {}, "View", "Text", messages, createStyles(palettes[params.theme]), params.compact, constraints, normalizeTranscriptText, { enabled: false },
   );
   return { bubbles: render(), messages, constraints };
 }
@@ -87,6 +87,10 @@ test("YOU and AI receive definite inner widths across phone/tablet sizes, compac
         const bubbleStyle = flatten(bubble.props.style);
         const [role, body] = bubble.props.children;
         const bodyStyle = flatten(body.props.style);
+        assert.equal(body.props.onLayout, undefined, "disabled diagnostics add no native layout listener");
+        assert.equal(body.props.onTextLayout, undefined, "disabled diagnostics add no text layout listener");
+        assert.equal(body.props.ref, undefined, "disabled diagnostics attach no Text ref");
+        assert.equal(bodyStyle.lineHeight, compact ? 19 : 21, "live line height remains unchanged");
         assert.equal(role.props.children, index === 0 ? "You" : "AI");
         assert.equal(bubbleStyle.alignSelf, index === 0 ? "flex-end" : "flex-start");
         assert.equal(bubbleStyle.width, constraints.bubbleMaxWidth);

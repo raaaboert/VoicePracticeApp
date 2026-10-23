@@ -157,6 +157,8 @@ import {
 } from "./src/lib/storage";
 import { ScorecardView } from "./src/screens/ScorecardView";
 import { SimulationScreen } from "./src/screens/SimulationScreen";
+import { TranscriptWrappingDiagnostics } from "./src/diagnostics/TranscriptDiagnosticsScreen";
+import { transcriptDiagnosticsAllowed } from "./src/diagnostics/transcriptWrappingDiagnostics";
 import { PerformanceScreen } from "./src/screens/PerformanceScreen";
 import { TrainingContentScreen } from "./src/trainingContent/TrainingContentScreen";
 import { RelatedTrainingContentScreen } from "./src/trainingContent/RelatedTrainingContentScreen";
@@ -816,6 +818,10 @@ export default function App() {
   const [timezones, setTimezones] = useState<string[]>(COMMON_TIMEZONES);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [mobileAuthToken, setMobileAuthToken] = useState<string | null>(null);
+  const [transcriptDiagnosticsOpen, setTranscriptDiagnosticsOpen] = useState(false);
+  const canOpenTranscriptDiagnostics = transcriptDiagnosticsAllowed(process.env.EXPO_PUBLIC_API_BASE_URL, getApiBaseUrl())
+    && Boolean(user?.emailVerifiedAt && mobileAuthToken);
+  useEffect(() => { setTranscriptDiagnosticsOpen(false); }, [screen, user?.id, user?.orgId, mobileAuthToken]);
   const [entitlements, setEntitlements] = useState<UserEntitlementsResponse | null>(null);
   const [trainingContentEnabled, setTrainingContentEnabled] = useState(false);
   const [trainingContentNotice, setTrainingContentNotice] = useState<string | null>(null);
@@ -835,6 +841,7 @@ export default function App() {
     useState(true);
   const [superUserOrgOptions, setSuperUserOrgOptions] = useState<SuperUserOrgOption[]>([]);
   const [activeSuperUserOrgId, setActiveSuperUserOrgIdState] = useState<string | null>(null);
+  useEffect(() => { setTranscriptDiagnosticsOpen(false); }, [activeSuperUserOrgId]);
   const [selectedSuperUserOrgId, setSelectedSuperUserOrgId] = useState("");
   const [superUserOrgSearch, setSuperUserOrgSearch] = useState("");
   const [superUserOrgError, setSuperUserOrgError] = useState<string | null>(null);
@@ -5687,10 +5694,21 @@ export default function App() {
         <Pressable style={styles.ghostButton} onPress={() => setScreen("home")}>
           <Text style={styles.ghostButtonText}>Back</Text>
         </Pressable>
-        <Text style={styles.topTitle}>Settings</Text>
+        {canOpenTranscriptDiagnostics ? (
+          <Pressable accessibilityRole="button" accessibilityLabel="Settings"
+            accessibilityHint="Hold to open staging transcript diagnostics" delayLongPress={1200}
+            onLongPress={() => setTranscriptDiagnosticsOpen(true)}>
+            <Text style={styles.topTitle}>Settings</Text>
+          </Pressable>
+        ) : <Text style={styles.topTitle}>Settings</Text>}
         <View style={styles.spacer} />
       </View>
 
+      {canOpenTranscriptDiagnostics && transcriptDiagnosticsOpen ? (
+        <Modal visible animationType="none" onRequestClose={() => setTranscriptDiagnosticsOpen(false)}>
+          <TranscriptWrappingDiagnostics colorScheme={colorScheme} onClose={() => setTranscriptDiagnosticsOpen(false)} />
+        </Modal>
+      ) : null}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         {user?.isSuperUser ? (
           <View style={styles.card}>
