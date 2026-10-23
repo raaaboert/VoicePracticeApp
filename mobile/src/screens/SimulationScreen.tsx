@@ -5089,7 +5089,7 @@ export function SimulationScreen({
                     useCompactTranscript ? styles.messageBubbleCompact : null,
                     message.role === "user" ? styles.userBubble : styles.aiBubble,
                     messageWidthConstraints
-                      ? { maxWidth: messageWidthConstraints.bubbleMaxWidth }
+                      ? { width: messageWidthConstraints.bubbleMaxWidth }
                       : null,
                   ]}
                 >
@@ -5109,7 +5109,7 @@ export function SimulationScreen({
                       useCompactTranscript ? styles.messageTextCompact : null,
                       message.role === "user" ? styles.userMessageText : styles.aiMessageText,
                       messageWidthConstraints
-                        ? { maxWidth: messageWidthConstraints.textMaxWidth }
+                        ? { width: messageWidthConstraints.textMaxWidth }
                         : null,
                     ]}
                   >
@@ -5750,7 +5750,7 @@ function createStyles(palette: SimulationPalette) {
       borderWidth: 1,
       paddingHorizontal: 13,
       paddingVertical: 11,
-      maxWidth: "92%",
+      width: "92%",
       gap: 4,
     },
     messageBubbleCompact: {
