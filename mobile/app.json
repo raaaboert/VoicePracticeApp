@@ -45,7 +45,13 @@
     },
     "plugins": [
       "expo-asset",
-      "expo-audio",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ],
       "expo-font",
       "expo-sharing",
       "expo-status-bar",
