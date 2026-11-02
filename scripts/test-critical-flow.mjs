@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -141,6 +142,9 @@ async function apiRequest(baseUrl, pathName, options = {}) {
 
   const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
   const headers = {};
+  if (method === "POST" && pathName === "/orgs") {
+    headers["Idempotency-Key"] = randomUUID();
+  }
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
   }

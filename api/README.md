@@ -44,6 +44,7 @@ Express API for Phase 1 development.
 - `GET /support/cases` (admin)
 - `GET /support/cases/:caseId` (admin)
 - `GET /orgs` / `POST /orgs` / `PATCH /orgs/:orgId` (admin)
+  - `POST /orgs` requires a UUID-v4 `Idempotency-Key` header.
 
 ## Environment
 

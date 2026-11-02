@@ -629,6 +629,16 @@ import {
   resolvePreferredSimulationDivisionId,
 } from "./services/simulationDivisionAnchoring.js";
 
+import {
+  fingerprintOrganizationCreationInput,
+  organizationIdForCreationOperation,
+  OrganizationCreationRetryError,
+  recordOrganizationCreation,
+  requireOrganizationCreationOperationId,
+  resolveOrganizationCreationReplay,
+  restoreOrganizationCreationReceipts,
+} from "./services/organizationCreationRetry.js";
+
 dotenv.config({ path: ".env.local" });
 dotenv.config();
 
@@ -4780,6 +4790,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     normalized.supportCases = legacySupportCases;
   }
 
+  restoreOrganizationCreationReceipts(normalized, raw);
   purgeDemoSeedData(normalized);
   purgeExpiredSupportTranscripts(normalized, now);
   expireOrgJoinRequests(normalized, new Date(now));
@@ -16613,6 +16624,18 @@ app.patch("/orgs/:orgId/modules/training-content", requireAdmin, async (request:
 });
 
 app.post("/orgs", requireAdmin, async (request: Request, response: Response) => {
+  let operationId: string;
+  try {
+    operationId = requireOrganizationCreationOperationId(request.get("Idempotency-Key"));
+  } catch (error) {
+    if (!(error instanceof OrganizationCreationRetryError)) throw error;
+    response.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+    response.status(400).json({ error: "Organization details must be an object." });
+    return;
+  }
   const body = request.body as {
     name?: string;
     contactName?: string;
@@ -16627,7 +16650,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     softLimitPercentTriggers?: number[];
     maxSimulationMinutes?: number;
   };
-  const name = body.name?.trim();
+  const fingerprint = fingerprintOrganizationCreationInput(body);
+  const name = typeof body.name === "string" ? body.name.trim() : "";
 
   if (!name) {
     response.status(400).json({ error: "Organization name is required." });
@@ -16635,6 +16659,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
   }
 
   const createdOrg = await withDatabase(async (db) => {
+    const replay = resolveOrganizationCreationReplay(db, operationId, fingerprint);
+    if (replay) return replay;
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     if (body.activeIndustries !== undefined
@@ -16662,7 +16688,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     );
     const monthlyMinutesFallback = Math.floor((dailySecondsQuota * 30) / 60);
     const org: EnterpriseOrg = {
-      id: `org_${uuid()}`,
+      id: organizationIdForCreationOperation(operationId),
       name,
       status: "active",
       contactName: normalizeContactName(body.contactName),
@@ -16687,6 +16713,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     };
 
     db.orgs.push(org);
+    recordOrganizationCreation(db, operationId, fingerprint, org);
     appendPlatformAuditEvent(db, {
       action: "org.created",
       orgId: org.id,
@@ -16698,6 +16725,10 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       }
     });
     return org;
+  }).catch((error: unknown) => {
+    if (!(error instanceof OrganizationCreationRetryError)) throw error;
+    response.status(error.status).json({ error: error.message, code: error.code });
+    return null;
   });
   if (!createdOrg) return;
   organizationConfigurationResponseObserverForTest?.("POST /orgs", 201);

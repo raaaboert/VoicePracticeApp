@@ -1372,6 +1372,7 @@ async function adminRequest(pathname: string, init?: RequestInit) {
     headers: {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       Authorization: `Bearer ${token}`,
+      ...(pathname === "/orgs" && init?.method === "POST" ? { "Idempotency-Key": crypto.randomUUID() } : {}),
       ...(init?.headers ?? {}),
     },
   });

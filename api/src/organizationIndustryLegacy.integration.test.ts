@@ -73,6 +73,7 @@ test("real PostgreSQL global catalog safety and legacy organization industry com
     const master = (await login.json() as { token: string }).token;
     const call = async (path: string, body?: Record<string, unknown>, admin = false, method = body ? "POST" : "GET") => {
       const response = await fetch(base + path, { method, headers: { Authorization: `Bearer ${admin ? master : token}`,
+        ...(path === "/orgs" && method === "POST" ? { "Idempotency-Key": randomUUID() } : {}),
         "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
       return { status: response.status, body: await response.json() as Record<string, unknown> };
     };
