@@ -11,6 +11,7 @@ import type {
   TrainingContentBackupObjectStorage,
 } from "../storage/trainingContentBackupStorage.js";
 import { DefaultTrainingContentBackupService } from "./trainingContentBackup.js";
+import { R2TrainingContentBackupStorage } from "../storage/trainingContentBackupStorage.js";
 
 const NOW = new Date("2026-08-13T12:00:00.000Z");
 
@@ -112,7 +113,7 @@ class FakeBackupAssetStore {
 
   async listAssetsPendingBackup(limit: number) {
     return this.assets
-      .filter((asset) => asset.uploadState === "ready" && !asset.backedUpAt && asset.finalObjectKey)
+      .filter((asset) => ["ready", "superseded"].includes(asset.uploadState) && !asset.objectDeletedAt && !asset.backedUpAt && asset.finalObjectKey)
       .slice(0, limit)
       .map((asset) => structuredClone(asset));
   }
@@ -136,6 +137,9 @@ class FakeBackupStorage implements TrainingContentBackupObjectStorage {
   fail = false;
   failure: unknown = null;
   readonly failOnCopies = new Set<number>();
+  readonly objects = new Set<string>();
+  omitDestination = false;
+  metadata: { byteSize: number; contentType: string; etag: string } = { byteSize: 42, contentType: "application/pdf", etag: '"etag"' };
 
   async copyFromSource(params: {
     sourceBucket: string;
@@ -146,15 +150,15 @@ class FakeBackupStorage implements TrainingContentBackupObjectStorage {
     if (this.fail || this.failOnCopies.has(this.copies.length)) {
       throw this.failure ?? new Error("provider_failure");
     }
+    if (!this.omitDestination) this.objects.add(params.destinationKey);
     return this.results.shift() ?? "copied";
   }
 
   async headObject(key: string) {
+    if (!this.objects.has(key)) return null;
     return {
       key,
-      byteSize: 42,
-      contentType: "application/pdf",
-      etag: '"backup"',
+      ...this.metadata,
       lastModified: NOW.toISOString(),
     };
   }
@@ -194,6 +198,102 @@ test("finalized assets copy to the backup bucket with their exact immutable fina
   assert.equal(first.backedUpAt, NOW.toISOString());
   assert.notEqual(first.finalObjectKey, replacement.finalObjectKey);
   assert.equal(harness.logs.some((line) => line.includes(first.finalObjectKey!)), false);
+});
+
+test("failed backup remains retryable after supersession and repeated reconciliation converges", async () => {
+  const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce");
+  const h = serviceHarness([asset]);
+  h.storage.fail = true;
+  assert.equal(await h.service.backupFinalizedAsset(asset), "failed");
+  asset.uploadState = "superseded";
+  asset.isCurrent = false;
+  asset.supersededAt = NOW.toISOString();
+  h.storage.fail = false;
+  assert.equal((await h.service.reconcilePendingBackups(10)).backedUp, 1);
+  assert.equal(asset.backupAttemptCount, 1);
+  assert.equal(asset.backedUpAt, NOW.toISOString());
+  assert.equal((await h.service.reconcilePendingBackups(10)).scanned, 0);
+  assert.equal(h.storage.copies.length, 2);
+});
+
+test("a copied object whose receipt failed converges without another transfer", async () => {
+  const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce");
+  const h = serviceHarness([asset]);
+  const mark = h.store.markAssetBackedUp.bind(h.store);
+  h.store.markAssetBackedUp = async () => { throw new Error("commit_failed"); };
+  assert.equal(await h.service.backupFinalizedAsset(asset), "failed");
+  assert.equal(asset.backedUpAt, null);
+  h.store.markAssetBackedUp = mark;
+  assert.equal(await h.service.backupFinalizedAsset(asset), "already_present");
+  assert.equal(h.storage.copies.length, 1);
+});
+
+test("missing destination cannot produce a successful receipt", async () => {
+  const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce");
+  const h = serviceHarness([asset]);
+  h.storage.omitDestination = true;
+  const report = await h.service.reconcilePendingBackups(10);
+  assert.equal(report.failed, 1);
+  assert.equal(report.stillPending, 1);
+  assert.equal(asset.backedUpAt, null);
+});
+
+for (const mismatch of [{ byteSize: 99 }, { etag: '"wrong"' }, { contentType: "text/plain" }]) {
+  test(`existing mismatched destination fails closed: ${JSON.stringify(mismatch)}`, async () => {
+    const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce");
+    const h = serviceHarness([asset]);
+    h.storage.objects.add(asset.finalObjectKey!);
+    Object.assign(h.storage.metadata, mismatch);
+    assert.equal(await h.service.backupFinalizedAsset(asset), "failed");
+    assert.equal(asset.backedUpAt, null);
+    assert.equal(h.storage.copies.length, 0);
+  });
+}
+
+test("explicit verification can repair a missing previously recorded backup", async () => {
+  const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce", { backedUpAt: "2026-08-01T00:00:00.000Z" });
+  const h = serviceHarness([asset]);
+  assert.equal(await h.service.backupFinalizedAsset(asset), "skipped");
+  assert.equal(await h.service.backupFinalizedAsset(asset, true), "copied");
+  assert.equal(await h.service.backupFinalizedAsset(asset, true), "already_present");
+  assert.equal(h.storage.copies.length, 1);
+  assert.equal(asset.backedUpAt, "2026-08-01T00:00:00.000Z");
+});
+
+test("deleted and unfinished assets are never copied", async () => {
+  for (const overrides of [{ objectDeletedAt: NOW.toISOString() }, { uploadState: "processing" as const }]) {
+    const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce", overrides);
+    const h = serviceHarness([asset]);
+    assert.equal(await h.service.backupFinalizedAsset(asset), "skipped");
+    assert.equal(h.storage.copies.length, 0);
+  }
+});
+
+test("concurrent conditional copies converge through a bucket lock without duplicate bytes or receipts", async () => {
+  const asset = readyAsset("asset_1", "objects/org/content/primary/1/nonce");
+  const store = new FakeBackupAssetStore([asset]);
+  let exists = false, successfulCopies = 0;
+  const backupStorage = new R2TrainingContentBackupStorage(ENABLED_CONFIG.backup.r2!, { client: {
+    async send(command: any) {
+      if (command.constructor.name === "HeadObjectCommand") {
+        if (!exists) throw { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } };
+        return { ContentLength: 42, ContentType: "application/pdf", ETag: '"etag"' };
+      }
+      if (exists) throw { name: "ObjectLockedByBucketPolicy", $metadata: { httpStatusCode: 409 } };
+      exists = true;
+      successfulCopies++;
+      return {};
+    },
+  } });
+  const service = new DefaultTrainingContentBackupService({ config: ENABLED_CONFIG,
+    assetStore: store as unknown as TrainingContentAssetStore, backupStorage, now: () => NOW,
+    logger: { info() {}, warn() {} } });
+  const results = await Promise.all([service.backupFinalizedAsset(structuredClone(asset)), service.backupFinalizedAsset(structuredClone(asset))]);
+  assert.deepEqual(results.sort(), ["already_present", "copied"]);
+  assert.equal(successfulCopies, 1);
+  assert.equal(store.assets.length, 1);
+  assert.equal(asset.backedUpAt, NOW.toISOString());
+  assert.equal(asset.backupAttemptCount, 0);
 });
 
 test("immutable already-present copies converge to durable backup success", async () => {

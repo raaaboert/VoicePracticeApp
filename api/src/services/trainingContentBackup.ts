@@ -6,6 +6,7 @@ import type {
 import type {
   TrainingContentBackupObjectStorage,
 } from "../storage/trainingContentBackupStorage.js";
+import type { TrainingContentStoredObject } from "../storage/trainingContentObjectStorage.js";
 
 export type TrainingContentBackupOutcome =
   | "disabled"
@@ -23,7 +24,7 @@ export interface TrainingContentBackupReconciliationReport {
 }
 
 export interface TrainingContentBackupService {
-  backupFinalizedAsset(asset: TrainingContentAssetRecord): Promise<TrainingContentBackupOutcome>;
+  backupFinalizedAsset(asset: TrainingContentAssetRecord, verifyExistingReceipt?: boolean): Promise<TrainingContentBackupOutcome>;
   reconcilePendingBackups(limit: number): Promise<TrainingContentBackupReconciliationReport>;
 }
 
@@ -43,30 +44,32 @@ export class DefaultTrainingContentBackupService implements TrainingContentBacku
   }
 
   async backupFinalizedAsset(
-    asset: TrainingContentAssetRecord
+    asset: TrainingContentAssetRecord,
+    verifyExistingReceipt = false
   ): Promise<TrainingContentBackupOutcome> {
     if (!this.dependencies.config.backup.enabled) {
       return "disabled";
     }
     if (
-      asset.uploadState !== "ready"
+      (asset.uploadState !== "ready" && asset.uploadState !== "superseded")
+      || asset.objectDeletedAt !== null
       || !asset.finalObjectKey
-      || asset.backedUpAt
+      || (asset.backedUpAt && !verifyExistingReceipt)
       || !this.dependencies.config.r2
     ) {
       return "skipped";
     }
 
     try {
-      const copyResult = await this.dependencies.backupStorage.copyFromSource({
+      const existing = await this.dependencies.backupStorage.headObject(asset.finalObjectKey);
+      if (existing) assertBackupObjectMatches(asset, existing);
+      const copyResult = existing ? "already_present" : await this.dependencies.backupStorage.copyFromSource({
         sourceBucket: this.dependencies.config.r2.bucket,
         sourceKey: asset.finalObjectKey,
         destinationKey: asset.finalObjectKey,
       });
-      const stored = await this.dependencies.backupStorage.headObject(asset.finalObjectKey);
-      if (!stored || (asset.byteSize !== null && stored.byteSize !== asset.byteSize)) {
-        throw new Error("backup_object_confirmation_failed");
-      }
+      const stored = existing ?? await this.dependencies.backupStorage.headObject(asset.finalObjectKey);
+      assertBackupObjectMatches(asset, stored);
       await this.dependencies.assetStore.markAssetBackedUp(
         asset.id,
         this.dependencies.now?.() ?? new Date()
@@ -84,7 +87,7 @@ export class DefaultTrainingContentBackupService implements TrainingContentBacku
         );
         attemptCount = recorded.backupAttemptCount;
       } catch {
-        // The ready asset remains usable even if recording the retry state also fails.
+        // Published content remains usable even if recording the retry state also fails.
       }
       const diagnostics = describeBackupError(error, [
         asset.finalObjectKey,
@@ -129,6 +132,23 @@ export class DefaultTrainingContentBackupService implements TrainingContentBacku
       failed,
       stillPending: await this.dependencies.assetStore.countAssetsPendingBackup(),
     };
+  }
+}
+
+/** Metadata identity check, not a claim that every ETag is a cryptographic hash. */
+export function assertBackupObjectMatches(
+  asset: Pick<TrainingContentAssetRecord, "finalObjectKey" | "byteSize" | "detectedMimeType" | "checksumOrEtag">,
+  stored: TrainingContentStoredObject | null,
+): asserts stored is TrainingContentStoredObject {
+  const etag = (value: string) => value.trim().replace(/^"|"$/g, "");
+  const mime = (value: string) => value.split(";", 1)[0]!.trim().toLowerCase();
+  if (!stored || stored.key !== asset.finalObjectKey || asset.byteSize === null
+    || stored.byteSize !== asset.byteSize
+    || (asset.detectedMimeType !== null && (!stored.contentType
+      || mime(stored.contentType) !== mime(asset.detectedMimeType)))
+    || (asset.checksumOrEtag !== null && (!stored.etag
+      || etag(stored.etag) !== etag(asset.checksumOrEtag)))) {
+    throw new Error("backup_object_confirmation_failed");
   }
 }
 

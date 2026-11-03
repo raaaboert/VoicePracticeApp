@@ -136,6 +136,12 @@ export class TrainingContentCleanupService {
         if (!asset.finalObjectKey || asset.isCurrent || asset.uploadState === "ready") {
           return;
         }
+        if (asset.uploadState === "superseded" && this.dependencies.config.backup.enabled && !asset.backedUpAt) {
+          // Keep the last recoverable published bytes until a retry records protection.
+          // Temporary/terminal objects and the configured retention cutoff are unchanged.
+          report.errors.push({ category: "backup_required", orgId: asset.orgId, assetId: asset.id, objectKey: null });
+          return;
+        }
         report.finalObjectDeleteCount += 1;
         if (apply) {
           await this.dependencies.objectStorage.deleteObject(asset.finalObjectKey);
