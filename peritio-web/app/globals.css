@@ -2596,6 +2596,47 @@ input[type="radio"] {
   margin: 0;
 }
 
+.training-content-create > .training-content-band {
+  padding-inline: 1.25rem;
+}
+
+.training-content-create .training-content-category-help {
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+
+.training-content-create :is(input, select, textarea) {
+  scroll-margin-block-end: calc(8rem + env(safe-area-inset-bottom, 0px));
+}
+
+.training-content-create > .training-content-sticky-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  border-top: 0;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.training-content-create > .training-content-sticky-actions > button {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.training-content-create > .training-content-sticky-actions > button:first-child {
+  justify-self: start;
+}
+
+.training-content-create > .training-content-sticky-actions > button:last-child {
+  justify-self: end;
+}
+
 .training-content-page-actions {
   justify-content: flex-end;
 }
@@ -4771,6 +4812,10 @@ input[type="radio"] {
 
   .training-content-sticky-actions .page-actions > * {
     flex: 1 1 10rem;
+  }
+
+  .training-content-create > .training-content-sticky-actions > button {
+    width: 100%;
   }
 
   .training-content-category-create,

@@ -812,7 +812,7 @@ export function TrainingContentEditor({
             />
           </label>
           <label className="field-label">
-            Content Category
+            Library Category
             <select
               className="text-input"
               value={draft.categoryId}

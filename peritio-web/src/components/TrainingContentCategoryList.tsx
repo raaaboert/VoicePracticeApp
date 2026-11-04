@@ -138,7 +138,7 @@ function ContentRows({
         <div id={detailId} className="training-content-compact-details" hidden={!open}>
           {item.description ? <p>{item.description}</p> : <p className="muted-copy">No description provided.</p>}
           <dl>
-            {showCategory ? <><dt>Content Category</dt><dd>{item.categoryName}</dd></> : null}
+            {showCategory ? <><dt>Library Category</dt><dd>{item.categoryName}</dd></> : null}
             <dt>Related Focus Topics</dt>
             <dd>{item.focusTopicAuthority === "assignments"
               ? item.relatedFocusTopics?.map((topic) => `${topic.name}${topic.available ? "" : " (unavailable)"}`).join(", ") || "None"
@@ -256,7 +256,7 @@ export function TrainingContentCategoryList({
           ...(current[categoryId] ?? defaultCategoryState()),
           page,
           loading: false,
-          error: error instanceof Error ? error.message : "Could not load this Content Category.",
+          error: error instanceof Error ? error.message : "Could not load this Library Category.",
         },
       }));
     }
@@ -327,9 +327,9 @@ export function TrainingContentCategoryList({
               placeholder="Title, description, category, or Focus Topic" />
           </span>
         </label>
-        <label className="field-label">Content Category
+        <label className="field-label">Library Category
           <select className="text-input" value={filters.categoryId} onChange={(event) => updateFilters({ categoryId: event.target.value })}>
-            <option value="">All Content Categories</option>
+            <option value="">All Library Categories</option>
             {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
           </select>
         </label>
@@ -368,7 +368,7 @@ export function TrainingContentCategoryList({
 
     <section className="training-content-band">
       <div className="section-header"><div><p className="eyebrow">Library</p>
-        <h2>{defaultView ? "Content Categories" : "Learning Resources"}</h2></div></div>
+        <h2>{defaultView ? "Library Categories" : "Learning Resources"}</h2></div></div>
       {defaultView ? <div className="training-content-category-groups">
         {categories.map((category) => {
           const state = categoryStates[category.id] ?? defaultCategoryState();
@@ -392,14 +392,14 @@ export function TrainingContentCategoryList({
               {state.error ? <div className="notice" role="alert"><p>{state.error}</p>
                 <button type="button" className="ghost-button" onClick={() => void loadCategory(category.id, state.page)}>Retry</button></div> : null}
               {state.response && !state.loading && !state.error ? <>
-                {state.response.items.length === 0 ? <p className="muted-copy">No Learning Resources in this Content Category.</p>
+                {state.response.items.length === 0 ? <p className="muted-copy">No Learning Resources in this Library Category.</p>
                   : <ContentRows items={state.response.items} orgId={orgId} showCategory={false} />}
                 <Pagination response={state.response} label={`${category.name} pages`} onPage={(page) => void loadCategory(category.id, page)} />
               </> : null}
             </div>
           </section>;
         })}
-        {categories.length === 0 ? <div className="empty-state"><h3>No Content Categories</h3><p>Create a Content Category before adding Learning Resources.</p></div> : null}
+        {categories.length === 0 ? <div className="empty-state"><h3>No Library Categories</h3><p>Create a Library Category before adding Learning Resources.</p></div> : null}
       </div> : <>
         {flatLoading ? <p className="muted-copy training-content-loading"><LoaderCircle aria-hidden="true" size={18} /> Loading Learning Resources…</p> : null}
         {flatError ? <div className="notice" role="alert"><p>{flatError}</p>
