@@ -94,8 +94,9 @@ test("Training Content forms separate categories from optional Focus Topics and 
     assert.equal(source.includes("beforeunload"), true);
     assert.equal(source.includes("<UnsavedChangesDialog"), true);
     assert.equal(source.includes("Back to Learning Resources"), true);
-    assert.equal(source.includes("training-content-sticky-actions"), true);
   }
+  assert.equal(createSource.includes("training-content-create-actions"), true);
+  assert.equal(editorSource.includes("training-content-sticky-actions"), true);
   assert.equal(createSource.includes("required"), true);
   assert.equal(createSource.includes("Cancel"), true);
   assert.equal(editorSource.includes("Close"), true);

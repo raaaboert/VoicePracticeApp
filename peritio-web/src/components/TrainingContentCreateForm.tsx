@@ -309,7 +309,7 @@ export function TrainingContentCreateForm({
           ) : null}
 
           {error ? <div className="notice danger">{error}</div> : null}
-          <div className="training-content-sticky-actions">
+          <div className="training-content-create-actions">
             <button
               type="button"
               className="ghost-button"
