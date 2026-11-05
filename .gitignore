@@ -55,5 +55,8 @@ scripts/generate_state_summary_doc.py
 **/android
 
 # api data
+*.pgbak
+*.dir.tar.gz
+*.dump
 api/db.local.json
 api/db.local.*.json

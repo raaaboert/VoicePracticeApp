@@ -15,6 +15,7 @@
     "force:mobile-reonboarding": "tsx ./scripts/force-mobile-reonboarding.ts",
     "cleanup:training-content": "tsx ./scripts/cleanup-training-content-storage.ts",
     "backup:reconcile-training-content": "tsx ./scripts/reconcile-training-content-backup.ts",
+    "backup:postgres": "tsx ./scripts/postgres-backup.ts",
     "db:migrate-training-packs": "tsx ./scripts/migrate-training-pack-schema.ts",
     "db:backfill-focus-topic-authority": "tsx ./scripts/backfill-focus-topic-authority.ts",
     "smoke:training-content-r2": "tsx ./scripts/smoke-training-content-r2.ts",

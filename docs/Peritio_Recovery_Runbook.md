@@ -40,10 +40,17 @@ behavior and snapshot protection remain process-local; see
 
 Related procedures:
 
+- [A2.2 independent PostgreSQL backups: staging tooling and isolated restore preparation](./Peritio_Postgres_Independent_Backups.md)
 - [Peritio Rollback Procedure](./Peritio_Rollback_Procedure.md)
 - [Peritio Config Inventory](./Peritio_Config_Inventory.md)
 - [Peritio Database Bootstrap And Refresh](./Peritio_Database_Bootstrap_Refresh.md)
 - [Peritio Training Content Storage](./Peritio_Training_Content_Storage.md)
+
+A2.2's independent archive tooling remains staging-only and unactivated. Follow
+its linked procedure for a matching encrypted archive/manifest, escrowed key,
+validation-before-publication, isolated restore and plaintext/key disposal. Its
+checksums and encryption do not independently prove Peritio producer identity;
+production automation requires the documented retry and signing/provenance decisions.
 
 ## Immediate Incident Checklist
 
