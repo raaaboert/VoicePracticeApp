@@ -58,10 +58,10 @@ class MemoryStorage implements IndependentBackupStorage {
   }
   async manifests(prefix: string) { return [...this.objects.keys()].filter(key => key.startsWith(prefix) && key.endsWith("complete.json")); }
 }
-async function harness(t: TestContext) {
+async function harness(t: TestContext, overrides: NodeJS.ProcessEnv = {}) {
   const directory = await privateBackupDirectory(); t.after(() => removeBackupDirectory(directory));
   const publicFile = path.join(directory, "public.pem"); await writeFile(publicFile, KEY.publicKey);
-  const config = loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_PUBLIC_KEY_FILE: publicFile });
+  const config = loadPostgresBackupConfig("staging", { ...ENV, ...overrides, PG_BACKUP_PUBLIC_KEY_FILE: publicFile });
   const storage = new MemoryStorage(); let posts = 0, downloads = 0;
   let identityValid = true, downloadFails = false, ready = true;
   const source: RenderBackupSource = {
@@ -89,6 +89,17 @@ test("staging-only config rejects production, mixed buckets, endpoints and inval
     assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, ...changes }));
   assert.throws(() => loadPostgresBackupConfig("production", ENV));
 });
+test("freshness configuration preserves the default and accepts 144 hours only within staging guards", () => {
+  assert.equal(loadPostgresBackupConfig("staging", ENV).maxAgeHours, 36);
+  for (const hours of [25, 72, 120, 144])
+    assert.equal(loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_MAX_AGE_HOURS: String(hours) }).maxAgeHours, hours);
+  for (const value of ["", "-1", "0", "24", "145", "144.5", "NaN", "Infinity"])
+    assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_MAX_AGE_HOURS: value }), /invalid_backup_limit/);
+  const extended = { ...ENV, PG_BACKUP_MAX_AGE_HOURS: "144" };
+  assert.throws(() => loadPostgresBackupConfig("production", extended), /staging_backup_target_required/);
+  assert.throws(() => loadPostgresBackupConfig("staging", { ...extended, PERITIO_ENV: "production" }), /staging_backup_target_required/);
+});
+
 test("actual configuration loader accepts Render base, primary and replica ID formats", () => {
   for (const id of ["dpg-12345678901234567890", "dpg-c1234567890123456789-a", "dpg-12345678901234567890-bd"])
     assert.equal(loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_RENDER_POSTGRES_ID: id }).postgresId, id);
@@ -151,6 +162,24 @@ test("missing and stale success detection uses export age, with exact retention 
   assert.throws(() => validateBackupManifest(m, h.config, "2026-11-03", new Date(expires)), /backup_retention_expired/);
   assert.equal(expires - NOW.getTime(), 30 * DAY_MS);
 });
+test("144-hour configuration archives and supports five-day checks and verification with an exact stale boundary", async t => {
+  const h = await harness(t, { PG_BACKUP_MAX_AGE_HOURS: "144" });
+  assert.equal((await h.run()).outcome, "archived");
+  assert.equal((await h.run()).outcome, "already_complete");
+  h.storage.putFile = async () => { throw Error("check attempted write"); };
+  h.storage.putManifest = async () => { throw Error("check attempted write"); };
+  for (const verify of [false, true]) {
+    for (const hours of [120, 144]) {
+      const report = await checkIndependentPostgresBackup(h.config, h.storage, verify, new Date(NOW.getTime() + hours * 3_600_000));
+      assert.equal(report.outcome, "healthy"); assert.equal(report.ageHours, hours);
+      assert.equal(report.checksumVerified, verify);
+    }
+    await assert.rejects(checkIndependentPostgresBackup(h.config, h.storage, verify,
+      new Date(NOW.getTime() + 144 * 3_600_000 + 1)), /backup_stale/);
+  }
+  assert.equal(h.posts(), 1); assert.equal(h.downloads(), 1);
+});
+
 test("metadata and manifest target corruption fail closed", async t => {
   const h = await harness(t); await h.run(); const m = h.manifest(); m.header.postgresId = "dpg-other";
   h.storage.objects.set(h.manifestKey, { body: Buffer.from(JSON.stringify(m)), sha256: null });

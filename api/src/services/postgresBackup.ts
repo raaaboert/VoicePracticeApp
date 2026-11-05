@@ -91,7 +91,7 @@ export function loadPostgresBackupConfig(target: string | undefined, env: NodeJS
     accessKeyId: value(env, "PG_BACKUP_R2_ACCESS_KEY_ID"), secretAccessKey: value(env, "PG_BACKUP_R2_SECRET_ACCESS_KEY"),
     publicKeyFile: env.PG_BACKUP_PUBLIC_KEY_FILE?.trim() || "",
     retentionDays: integer(env.PG_BACKUP_RETENTION_DAYS, 30, 7, 90),
-    maxAgeHours: integer(env.PG_BACKUP_MAX_AGE_HOURS, 36, 25, 72),
+    maxAgeHours: integer(env.PG_BACKUP_MAX_AGE_HOURS, 36, 25, 144),
     maxBytes: integer(env.PG_BACKUP_MAX_BYTES, 536_870_912, 1024, 4_294_967_296),
     toolRevision: /^[a-f0-9]{40}$/i.test(env.RENDER_GIT_COMMIT ?? "") ? env.RENDER_GIT_COMMIT! : "uncommitted_or_unknown" };
 }

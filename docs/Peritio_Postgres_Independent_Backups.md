@@ -34,8 +34,9 @@ Public documentation and the official OpenAPI spec were inspected November 3–4
 This choice is verified against public contracts, not private-account execution.
 The first authorized staging run still must confirm permissions, download hostname,
 tar compatibility, runtime, free disk, R2 conditionals/locks and notification delivery.
-Native PITR remains in place. A daily independent export has a roughly 24-hour
-fallback RPO plus processing delay; it is not zero-data-loss replication.
+Native PITR remains in place. The five-day staging export schedule has a fallback
+RPO of up to roughly 120 hours plus processing delay; it is not zero-data-loss
+replication.
 
 ## Implemented behavior and boundaries
 
@@ -111,18 +112,29 @@ or second storage provider is added by this correction batch.
 ### Retention and monitoring
 
 `PG_BACKUP_RETENTION_DAYS` defaults to 30 (7–90 supported). It defines manifest
-expiry and the required owner-configured R2 lifecycle/lock policy. The job never
-installs or modifies that policy and never deletes archives. Actual automatic
+expiry; physical retention depends on the owner-configured R2 lifecycle/lock policy.
+The job never installs or modifies that policy and never deletes archives. Actual automatic
 expiration is **not active until the owner configures the bucket**. Changing the
 variable alone does not change physical retention. Keep lifecycle and lock values
 aligned; do not shorten retention below business/legal requirements.
 
+A bucket lock is an operational security recommendation, not a runtime prerequisite
+for staging `--run`, `--check` or `--verify`. The code does not query or require a
+lock setting; it uses create-only conditional writes and read-back validation.
+Those safeguards do not prevent a credential holder from deleting objects outside
+this tool. Lifecycle expiry alone does not provide protection against early deletion;
+the recommended minimum lock remains a separate owner configuration control.
+
 `--check` reads completion metadata and HEADs the latest archive. `--verify` also
 downloads and hashes that encrypted archive and compares its header with the
 manifest. Both fail for missing, stale, expired, malformed or inconsistent backups.
-Only completed slots count. Default maximum age is 36 hours, measured from export
-creation, not a later retry/completion. The newest malformed slot fails closed
-rather than silently accepting an older one. A truncated or oversized listing
+Only completed slots count. Default maximum age is 36 hours (accepted range 25–144),
+measured from export creation, not a later retry/completion. Use 144 for the five-day
+staging schedule on both the job and its independent checker. Exactly 144 hours is
+accepted; any older export fails freshness validation. This threshold affects
+`--check`/`--verify`, not the backup cadence or the 30-day retention policy.
+The newest malformed slot fails closed rather than silently accepting an older one.
+A truncated or oversized listing
 also fails. Neither check imports application schema initialization.
 
 Any CLI error exits 1 with a fixed error code; provider error messages, URLs,
@@ -170,7 +182,7 @@ against a provider in this implementation batch.
    the existing export for this task. No wildcard/private/internal hostnames.
 4. **Dedicated R2 bucket.** Create `peritio-postgres-backups-staging`, Standard storage,
    private, public development URL disabled, no public custom domain/Worker binding.
-   Add lifecycle expiry of 30 days for all objects and a 30-day minimum bucket lock.
+   Add lifecycle expiry of 30 days for all objects and a recommended 30-day minimum bucket lock.
    Confirm both apply to archive **and completion** objects. R2 expiration can lag
    the nominal time. Never apply these age-expiry rules to the existing media backup
    buckets; old current media can be required by today's database snapshot.
@@ -239,7 +251,12 @@ against a provider in this implementation batch.
    tar --version && npm ci --include=dev
    ```
 
-   Daily UTC schedule `0 4 * * *`. Command:
+   Staging UTC schedule `0 9 */5 * *`: 09:00 on days 1, 6, 11, 16, 21, 26 and
+   31 where present, resetting each month. Gaps are at most five days (120 hours),
+   rather than a fixed interval across month boundaries. Set
+   `PG_BACKUP_MAX_AGE_HOURS=144` on the job and independent freshness checker for
+   24 hours of grace beyond that gap. The default remains 36 hours for daily
+   schedules; accepted integer values are 25–144. Command:
 
    ```bash
    npm run backup:postgres -- --target staging --run
@@ -266,7 +283,7 @@ against a provider in this implementation batch.
    | `PG_BACKUP_R2_ACCESS_KEY_ID`, `PG_BACKUP_R2_SECRET_ACCESS_KEY` | Dedicated protected writer credentials |
    | `PG_BACKUP_PUBLIC_KEY_FILE` | Render path to uploaded public.pem secret file |
    | `PG_BACKUP_RETENTION_DAYS` | `30`, matching bucket lifecycle/lock |
-   | `PG_BACKUP_MAX_AGE_HOURS` | `36` |
+   | `PG_BACKUP_MAX_AGE_HOURS` | `144` for the five-day schedule; unchanged default is `36` |
    | `PG_BACKUP_MAX_BYTES` | `536870912` initially; measure actual export size and free disk |
 
 8. **Notifications.** Enable service-level **Only failure notifications**, with
@@ -318,6 +335,7 @@ jobs:
       PG_BACKUP_R2_ACCOUNT_ID: ${{ vars.PG_BACKUP_R2_ACCOUNT_ID }}
       PG_BACKUP_R2_ENDPOINT: ${{ vars.PG_BACKUP_R2_ENDPOINT }}
       PG_BACKUP_R2_BUCKET: peritio-postgres-backups-staging
+      PG_BACKUP_MAX_AGE_HOURS: '144'
       PG_BACKUP_R2_ACCESS_KEY_ID: ${{ secrets.PG_BACKUP_STAGING_READ_ACCESS_KEY_ID }}
       PG_BACKUP_R2_SECRET_ACCESS_KEY: ${{ secrets.PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY }}
     steps:
