@@ -19,7 +19,7 @@ const KEY = generateKeyPairSync("rsa", { modulusLength: 3072,
 const NOW = new Date("2026-11-03T08:00:00.000Z");
 const TARGET = "postgresql://localhost:55432/peritio_restore_a22";
 const ENV: NodeJS.ProcessEnv = { PERITIO_ENV: "staging", PG_BACKUP_RENDER_POSTGRES_ID: "dpg-c1234567890123456789-a",
-  PG_BACKUP_RENDER_OWNER_ID: "tea-c1234567890123456789", PG_BACKUP_R2_BUCKET: "peritio-postgres-backup-staging",
+  PG_BACKUP_RENDER_OWNER_ID: "tea-c1234567890123456789", PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-staging",
   PG_BACKUP_R2_ACCOUNT_ID: "a".repeat(32), PG_BACKUP_R2_ENDPOINT: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`,
   PG_BACKUP_R2_ACCESS_KEY_ID: "synthetic-only", PG_BACKUP_R2_SECRET_ACCESS_KEY: "synthetic-only",
   PG_BACKUP_RENDER_API_KEY: "synthetic-render-token", PG_BACKUP_DOWNLOAD_HOSTS: "exports.example.com" };
@@ -81,7 +81,9 @@ async function harness(t: TestContext) {
 }
 
 test("staging-only config rejects production, mixed buckets, endpoints and invalid retention", () => {
-  for (const changes of [{ PERITIO_ENV: "production" }, { PG_BACKUP_R2_BUCKET: "peritio-postgres-backup-production" },
+  assert.equal(loadPostgresBackupConfig("staging", ENV).bucket, "peritio-postgres-backups-staging");
+  for (const changes of [{ PERITIO_ENV: "production" }, { PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-production" },
+    { PG_BACKUP_R2_BUCKET: "peritio-postgres-backup-staging" },
     { PG_BACKUP_R2_ENDPOINT: "https://example.com" }, { PG_BACKUP_DOWNLOAD_HOSTS: "127.0.0.1" },
     { PG_BACKUP_RETENTION_DAYS: "0" }, { PG_BACKUP_RETENTION_DAYS: "91" }])
     assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, ...changes }));

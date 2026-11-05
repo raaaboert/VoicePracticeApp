@@ -17,7 +17,7 @@ export interface PostgresBackupConfig {
   renderDatabaseName: string;
   renderApiKey: string;
   downloadHosts: string[];
-  bucket: "peritio-postgres-backup-staging";
+  bucket: "peritio-postgres-backups-staging";
   endpoint: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -75,7 +75,7 @@ export function loadPostgresBackupConfig(target: string | undefined, env: NodeJS
   // https://github.com/render-oss/cli/blob/main/pkg/validate/id.go
   requireBackup(/^dpg-[a-z0-9]{20}(?:-[a-z]+)?$/.test(postgresId) && /^(tea|usr)-[a-z0-9]+$/.test(ownerId), "invalid_render_identity");
   const bucket = value(env, "PG_BACKUP_R2_BUCKET");
-  requireBackup(bucket === "peritio-postgres-backup-staging", "staging_backup_bucket_required");
+  requireBackup(bucket === "peritio-postgres-backups-staging", "staging_backup_bucket_required");
   const account = value(env, "PG_BACKUP_R2_ACCOUNT_ID");
   requireBackup(/^[a-f0-9]{32}$/i.test(account), "invalid_r2_account");
   const endpoint = new URL(value(env, "PG_BACKUP_R2_ENDPOINT"));

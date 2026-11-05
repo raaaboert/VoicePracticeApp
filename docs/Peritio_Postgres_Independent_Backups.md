@@ -40,7 +40,7 @@ fallback RPO plus processing delay; it is not zero-data-loss replication.
 ## Implemented behavior and boundaries
 
 - Every network mode requires `--target staging`, `PERITIO_ENV=staging`, a specific
-  Render database/owner ID and the dedicated bucket `peritio-postgres-backup-staging`.
+  Render database/owner ID and the dedicated bucket `peritio-postgres-backups-staging`.
   New export creation additionally verifies instance name, owner, ID, availability
   and databaseName **voicepractice_db**. Production is intentionally unsupported.
   Render ID validation follows the [official CLI validator](https://github.com/render-oss/cli/blob/main/pkg/validate/id.go):
@@ -168,7 +168,7 @@ against a provider in this implementation batch.
    privately in Render. Put only that hostname in `PG_BACKUP_DOWNLOAD_HOSTS` (comma
    separated if genuinely necessary). Do not copy the full signed URL or download
    the existing export for this task. No wildcard/private/internal hostnames.
-4. **Dedicated R2 bucket.** Create `peritio-postgres-backup-staging`, Standard storage,
+4. **Dedicated R2 bucket.** Create `peritio-postgres-backups-staging`, Standard storage,
    private, public development URL disabled, no public custom domain/Worker binding.
    Add lifecycle expiry of 30 days for all objects and a 30-day minimum bucket lock.
    Confirm both apply to archive **and completion** objects. R2 expiration can lag
@@ -262,7 +262,7 @@ against a provider in this implementation batch.
    | `PG_BACKUP_DOWNLOAD_HOSTS` | Verified signed-download hostname(s), no URL |
    | `PG_BACKUP_R2_ACCOUNT_ID` | Owner's Cloudflare account ID |
    | `PG_BACKUP_R2_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` |
-   | `PG_BACKUP_R2_BUCKET` | `peritio-postgres-backup-staging` |
+   | `PG_BACKUP_R2_BUCKET` | `peritio-postgres-backups-staging` |
    | `PG_BACKUP_R2_ACCESS_KEY_ID`, `PG_BACKUP_R2_SECRET_ACCESS_KEY` | Dedicated protected writer credentials |
    | `PG_BACKUP_PUBLIC_KEY_FILE` | Render path to uploaded public.pem secret file |
    | `PG_BACKUP_RETENTION_DAYS` | `30`, matching bucket lifecycle/lock |
@@ -317,7 +317,7 @@ jobs:
       PG_BACKUP_RENDER_OWNER_ID: ${{ vars.PG_BACKUP_STAGING_OWNER_ID }}
       PG_BACKUP_R2_ACCOUNT_ID: ${{ vars.PG_BACKUP_R2_ACCOUNT_ID }}
       PG_BACKUP_R2_ENDPOINT: ${{ vars.PG_BACKUP_R2_ENDPOINT }}
-      PG_BACKUP_R2_BUCKET: peritio-postgres-backup-staging
+      PG_BACKUP_R2_BUCKET: peritio-postgres-backups-staging
       PG_BACKUP_R2_ACCESS_KEY_ID: ${{ secrets.PG_BACKUP_STAGING_READ_ACCESS_KEY_ID }}
       PG_BACKUP_R2_SECRET_ACCESS_KEY: ${{ secrets.PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY }}
     steps:
