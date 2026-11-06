@@ -233,6 +233,9 @@ before(async () => {
   process.env.NODE_ENV = "test";
   process.env.PERITIO_ENV = "development";
   process.env.STORAGE_PROVIDER = "file";
+  // Forwarded test identities are accepted only from this explicitly modeled proxy.
+  process.env.CLIENT_IP_TRUSTED_PROXY_CIDRS = "127.0.0.1/32";
+  process.env.CLIENT_IP_PROXY_HEADER = "x-forwarded-for";
   process.env.DB_PATH = dbPath;
   process.env.ADMIN_BOOTSTRAP_PASSWORD = ADMIN_PASSWORD;
   process.env.ADMIN_TOKEN_SECRET = "admin_token_secret_for_reviewer_route_tests";

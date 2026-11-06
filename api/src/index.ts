@@ -1,5 +1,6 @@
 import "express-async-errors";
 import { listTopicScenarioManagement, topicScenarioOptions } from "./services/focusTopicScenarioManagement.js";
+import { createClientIpResolver, getIpRateLimitKey } from "./services/clientIp.js";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import crypto from "node:crypto";
@@ -3539,69 +3540,12 @@ interface RateLimiterOptions {
 const rateLimitByKey = new Map<string, RateLimitState>();
 let rateLimitCleanupCounter = 0;
 
-function getClientIp(request: Request): string {
-  const normalizeIp = (value: string | null | undefined): string | null => {
-    if (!value) {
-      return null;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-    if (trimmed.startsWith("::ffff:")) {
-      return trimmed.slice(7);
-    }
-    if (trimmed === "::1") {
-      return "127.0.0.1";
-    }
-    return trimmed;
-  };
-
-  const isPrivateOrLoopbackIp = (ip: string): boolean => {
-    const lower = ip.toLowerCase();
-    if (
-      lower === "127.0.0.1" ||
-      lower === "localhost" ||
-      lower.startsWith("10.") ||
-      lower.startsWith("192.168.") ||
-      lower.startsWith("169.254.") ||
-      lower.startsWith("fc") ||
-      lower.startsWith("fd") ||
-      lower.startsWith("fe80:")
-    ) {
-      return true;
-    }
-
-    if (lower.startsWith("172.")) {
-      const secondOctet = Number(lower.split(".")[1]);
-      return Number.isFinite(secondOctet) && secondOctet >= 16 && secondOctet <= 31;
-    }
-
-    return false;
-  };
-
-  const remoteAddress = normalizeIp(request.socket.remoteAddress);
-  const canTrustForwarded = remoteAddress ? isPrivateOrLoopbackIp(remoteAddress) : false;
-
-  if (canTrustForwarded) {
-    const forwarded = request.headers["x-forwarded-for"];
-    const firstForwarded = (() => {
-      if (typeof forwarded === "string" && forwarded.trim()) {
-        return forwarded.split(",")[0] ?? null;
-      }
-      if (Array.isArray(forwarded) && forwarded.length > 0) {
-        return forwarded[0] ?? null;
-      }
-      return null;
-    })();
-    const forwardedIp = normalizeIp(firstForwarded);
-    if (forwardedIp) {
-      return forwardedIp;
-    }
-  }
-
-  return remoteAddress || "unknown";
-}
+const getClientIp = createClientIpResolver(process.env, () => logWarnThrottled(
+  "client-ip:untrusted-forwarded",
+  "[client-ip] Ignoring forwarded client-IP headers from an untrusted connection peer; verify ingress configuration. Shared proxy limits may cause lockouts.",
+  5 * 60 * 1000,
+));
+const getClientIpRateLimitKey = (request: Request): string => getIpRateLimitKey(getClientIp(request));
 
 function cleanupRateLimitStore(nowMs: number): void {
   rateLimitCleanupCounter += 1;
@@ -3628,7 +3572,7 @@ function consumeRateLimit(
   const nowMs = Date.now();
   cleanupRateLimitStore(nowMs);
 
-  const selectorValue = selectorOverride || options.keySelector?.(request) || getClientIp(request);
+  const selectorValue = selectorOverride || options.keySelector?.(request) || getClientIpRateLimitKey(request);
   const key = `${options.name}:${selectorValue || "unknown"}`;
   const existing = rateLimitByKey.get(key);
   const state =
@@ -3665,7 +3609,7 @@ function rejectIfRateLimitAlreadyExhausted(
   const nowMs = Date.now();
   cleanupRateLimitStore(nowMs);
 
-  const selectorValue = options.keySelector?.(request) || getClientIp(request);
+  const selectorValue = options.keySelector?.(request) || getClientIpRateLimitKey(request);
   const state = rateLimitByKey.get(`${options.name}:${selectorValue || "unknown"}`);
   if (!state || nowMs - state.windowStartMs >= windowMs || state.count < max) {
     return false;
@@ -13095,9 +13039,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     // A 15s compressed audio clip should be well under this; keeps memory bounded.
-    // Busboy reports LIMIT_FILE_SIZE when bytes reach the configured value, so
-    // use max + 1 to retain an inclusive 12 MB application-level boundary.
-    fileSize: (12 * 1024 * 1024) + 1,
+    // Multer 2.5 treats fileSize as the inclusive maximum allowed size.
+    fileSize: 12 * 1024 * 1024,
     files: 1,
     fields: 4,
     parts: 5,
@@ -13193,7 +13136,7 @@ const mobileVerificationRateLimiter = createRateLimiter({
   max: 20,
   keySelector: (request) => {
     const bodyUserId = ((request.body as { userId?: unknown } | undefined)?.userId ?? "").toString().trim();
-    return `${getClientIp(request)}:${bodyUserId || "unknown"}`;
+    return `${getClientIpRateLimitKey(request)}:${bodyUserId || "unknown"}`;
   }
 });
 
@@ -13207,7 +13150,7 @@ const mobileOrgJoinRequestRateLimiter = createRateLimiter({
   name: "mobile-org-join-request",
   windowMs: 15 * 60 * 1000,
   max: 20,
-  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
+  keySelector: (request) => `${getClientIpRateLimitKey(request)}:${request.params.userId || "unknown"}`
 });
 
 const mobilePublicErrorReportRateLimiter = createRateLimiter({
@@ -13220,7 +13163,7 @@ const unauthenticatedAiRateLimitOptions: RateLimiterOptions = {
   name: "mobile-ai-unauthenticated",
   windowMs: 15 * 60 * 1000,
   max: 120,
-  keySelector: (request) => getClientIp(request)
+  keySelector: (request) => getClientIpRateLimitKey(request)
 };
 
 const authenticatedAiRateLimitOptions: RateLimiterOptions = {
@@ -28601,17 +28544,24 @@ function isJsonBodyParseError(error: unknown): boolean {
     status?: unknown;
     statusCode?: unknown;
     type?: unknown;
+    code?: unknown;
   };
   const status = candidate.status ?? candidate.statusCode;
-  return candidate.type === "entity.parse.failed" && status === 400;
+  return status === 400 && (candidate.type === "entity.parse.failed"
+    || candidate.code === "Z_DATA_ERROR" || candidate.code === "Z_BUF_ERROR");
 }
 
 app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
-  if (error instanceof multer.MulterError) {
+  if (error instanceof multer.MulterError || (error instanceof Error && error.message === "Unexpected end of form")) {
     response.status(400).json({
       error: "Multipart upload is invalid or exceeds the allowed limits.",
-      code: error.code
+      code: error instanceof multer.MulterError ? error.code : "INVALID_MULTIPART"
     });
+    return;
+  }
+
+  if (error && typeof error === "object" && "type" in error && error.type === "entity.too.large") {
+    response.status(413).json({ error: "Request body exceeds the allowed size." });
     return;
   }
 

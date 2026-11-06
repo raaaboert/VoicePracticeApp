@@ -244,7 +244,7 @@ against a provider in this implementation batch.
    use its approved cryptographic-erasure/disposal procedure when required. Keep
    `public.pem` for the job. Never attach the working private key to Render or Git.
 7. **Create one staging Render Cron Job later.** Git repo root, branch `staging`,
-   Node `24.18.0`, same region as staging DB, no persistent disk. Start with the
+   Node `24.22.2`, same region as staging DB, no persistent disk. Start with the
    smallest compute plan and measure memory/disk. Build:
 
    ```bash
@@ -270,7 +270,7 @@ against a provider in this implementation batch.
 
    | Variable | Staging-only value / owner action |
    | --- | --- |
-   | `NODE_VERSION` | `24.18.0` |
+   | `NODE_VERSION` | `24.22.2` |
    | `PERITIO_ENV` | `staging` |
    | `PG_BACKUP_RENDER_POSTGRES_ID` | Recorded staging `dpg-...` |
    | `PG_BACKUP_RENDER_OWNER_ID` | Recorded staging workspace/principal ID |
@@ -344,7 +344,7 @@ jobs:
           ref: staging
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.18.0
+          node-version: 24.22.2
           cache: npm
       - run: npm ci --include=dev
       - run: npm run backup:postgres -- --target staging --check

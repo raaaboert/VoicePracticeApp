@@ -32,6 +32,17 @@ database/R2 (provider resources).
 
 ## Authentication And Cryptography
 
+Client-IP trust is configured on the API only. Staging may deploy with fail-closed
+defaults, then verify actual peers/header behavior as described in `api/README.md`.
+Production requires verified ingress configuration; prefer CF-Connecting-IP and
+never guess Render's trusted CIDRs. Socket fallback can share limits and lock out
+legitimate users. No hosted trust settings have been verified or changed locally.
+
+| Variable | Purpose / owner | Default / recovery requirement |
+| --- | --- | --- |
+| `CLIENT_IP_TRUSTED_PROXY_CIDRS` | Nonsecret comma-separated trusted immediate proxy IPs/CIDRs; API | Empty (no proxy trusted). Recover only verified ingress addresses, never generic private ranges. |
+| `CLIENT_IP_PROXY_HEADER` | Nonsecret header selection; API | `x-forwarded-for`, or `cf-connecting-ip` only with verified ingress sanitation. Invalid values prevent startup. |
+
 | Variable | Purpose / owner | Applicability | Loss or wrong value during recovery | Rotatable? | Recovery note |
 | --- | --- | --- | --- | --- | --- |
 | `ADMIN_TOKEN_SECRET` | Signs/verifies admin tokens; API | API | Existing admin sessions fail; wrong/reused secret weakens isolation | **Yes** | Rotate after DB restore to invalidate resurrected admin sessions. Production requires an explicit distinct secret. |

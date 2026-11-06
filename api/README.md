@@ -101,6 +101,67 @@ OPENAI_MAX_DAILY_TOKENS_GLOBAL=
 SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 ```
 
+## Client IP trust and deployment checks
+
+The API ignores client-IP headers by default and keys IP-based rate limits on
+the socket peer. Private and loopback addresses are not automatically trusted.
+Express `trust proxy` remains disabled. Invalid proxy configuration stops startup.
+IPv6 IP-based rate limits group clients by /64; IPv4 and mapped IPv4 use their
+full IPv4 address. Session and audit metadata retain full canonical client IPs.
+Ignored forwarded headers from untrusted peers generate a fixed warning at most
+once per five minutes per API process, without IPs, headers or credentials.
+
+- `CLIENT_IP_TRUSTED_PROXY_CIDRS`: comma-separated, operator-verified immediate
+  proxy IPs/CIDRs (empty by default). Use ordinary IPv4 or IPv6 addresses; mapped
+  IPv6 CIDRs and `/0` are rejected. Do not trust all private networks, loopback,
+  or a hop count merely because the application is hosted on Render.
+- `CLIENT_IP_PROXY_HEADER`: `x-forwarded-for` (default) or `cf-connecting-ip`.
+  A header is accepted only from an explicitly trusted socket peer. XFF is
+  walked right to left, stopping at the nearest untrusted address. CF mode
+  requires exactly one valid IP, supplied/overwritten by the verified ingress.
+  Missing, duplicate, invalid or excessive headers fall back to the socket.
+
+**Staging may deploy with the fail-closed defaults.** Verify actual socket peer
+addresses and header behavior in staging before configuring any trusted CIDRs.
+Do not guess Render's ingress ranges. Shared proxy-IP limits can cause legitimate
+users to be locked out temporarily, including when defaults are used.
+**Production requires verified ingress configuration.** Prefer `cf-connecting-ip`
+over XFF once its sanitation and immediate proxy boundary are verified. Configure
+only verified proxy addresses; a header's presence alone does not establish trust.
+Repository evidence does not establish live peer CIDRs or header sanitation.
+
+Render's [PocketBase guidance](https://render.com/articles/host-pocketbase-on-render)
+recommends CF-Connecting-IP and warns against leftmost XFF. Its older
+[forwarding discussion](https://feedback.render.com/features/p/send-the-correct-x-forwarded-for)
+contains conflicting behavior reports. [Cloudflare documents](https://developers.cloudflare.com/fundamentals/reference/http-headers/)
+header rewriting and Worker exceptions. None justifies trusting an arbitrary
+private peer or a header without a verified ingress boundary.
+
+The request paths are:
+
+- Mobile, browser admin and operational scripts call the API directly. Behind
+  verified Render ingress, identify their connecting client with the chosen policy.
+- The Next.js customer dashboard makes server-side API fetches with freshly
+  constructed headers; it does not relay the browser's IP. These requests identify
+  the dashboard's egress, potentially shared across users. This pre-existing limit
+  needs staging evaluation; do not forward arbitrary browser headers as a fix.
+- Local/direct/private-network calls ignore forwarded headers unless their exact
+  proxy is deliberately configured. Being inside a private network is insufficient.
+
+Use non-abusive, owner-observed staging requests to verify peer/header sanitation
+for both the onrender.com and any custom hostname, mobile/admin traffic and
+dashboard proxy traffic. A forged XFF/CF header must not change the selected
+identity; two independent clients must remain distinct where per-client identity
+is expected. Verify private/direct bypass paths cannot impersonate the ingress.
+Do not run brute-force loops on hosted services. If the boundary cannot be
+established, resolve it with Render before enabling forwarded-header trust.
+
+The resolver also protects web OTP requests/verification, mobile onboarding and
+verification, organization join requests, public support reports, unauthenticated
+AI limits, web-session IP metadata and product-switch audit IP metadata.
+Authenticated AI allowances remain keyed by authenticated user. Rate limits remain
+process-local and reset on restart; this change does not add distributed limiting.
+
 ## Notes
 
 - Storage supports two providers:

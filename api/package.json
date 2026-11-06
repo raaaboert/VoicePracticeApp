@@ -36,10 +36,10 @@
     "@voicepractice/shared": "file:../shared",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
-    "express": "^4.22.2",
+    "express": "^4.22.3",
     "express-async-errors": "^3.1.1",
     "mdast-util-from-markdown": "^2.0.2",
-    "multer": "2.2.0",
+    "multer": "2.5.0",
     "pg": "^8.18.0",
     "uuid": "^11.1.1",
     "yauzl": "^3.4.0"

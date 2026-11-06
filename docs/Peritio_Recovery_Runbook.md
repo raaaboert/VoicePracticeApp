@@ -413,6 +413,21 @@ Do not run reconciliation or cleanup `--apply`, upload real files or perform a
 restore as part of non-mutating deployment verification. Record results before
 claiming provider-level validation or approving a production release.
 
+## Client-IP Configuration During Deployment Or Recovery
+
+Staging may deploy with fail-closed proxy defaults: leave
+`CLIENT_IP_TRUSTED_PROXY_CIDRS` empty until actual staging socket peers and header
+sanitation are verified. Do not guess Render's trusted ingress CIDRs. Production
+requires verified ingress configuration. Prefer `CLIENT_IP_PROXY_HEADER=cf-connecting-ip`
+over XFF once its overwrite policy and immediate trusted-peer boundary are confirmed.
+Follow the client-IP deployment checks in `api/README.md`, including public/private
+paths and the dashboard's shared egress. Shared proxy-IP limits can lock out
+legitimate users; fallback is secure against spoofed headers but is not per-user
+limiting. A fixed, non-sensitive untrusted-header warning is throttled to once per
+five minutes per API process. IPv6 rate-limit keys use /64 groups while session
+and audit metadata retain full canonical addresses. No provider setting changes
+or hosted verification are implied by these instructions.
+
 ## Hard Deletion Recovery
 
 Peritio has no simple hard-delete undo. Choose one of these explicit paths:

@@ -37,6 +37,9 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       ADMIN_BOOTSTRAP_PASSWORD: "auth_test_admin_password",
       ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false", TRAINING_CONTENT_STORAGE_PROVIDER: "disabled" });
     process.env.APP_REVIEW_EMAIL = "reviewer-privacy@auth.test"; process.env.APP_REVIEW_CODE = "808080";
+    // The loopback HTTP fixture models an explicitly trusted proxy, not a direct client.
+    process.env.CLIENT_IP_TRUSTED_PROXY_CIDRS = "127.0.0.1/32";
+    process.env.CLIENT_IP_PROXY_HEADER = "x-forwarded-for";
     const api = await import("./index.js");
     await t.test("missing-schema startup fails before API listen", async () => {
       await assert.rejects(api.startApiServer(), /auth_verification_accounts/);
