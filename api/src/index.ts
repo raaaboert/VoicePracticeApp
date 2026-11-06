@@ -4744,6 +4744,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 let databaseStorage: DatabaseStorage | null = null;
 let databaseCache: ApiDatabase | null = null;
 let databaseOperationQueue: Promise<void> = Promise.resolve();
+let databaseOperationObserverForTest: ((phase: "queued" | "acquired" | "released") => void) | null = null;
 let isDatabaseReady = false;
 let databaseReadyCheckedAt: string | null = null;
 let databaseReadyError: string | null = null;
@@ -4845,6 +4846,7 @@ async function migrateUserProfileAppStateNormalization(): Promise<void> {
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
+  databaseOperationObserverForTest?.("queued");
   let releaseLock: () => void = () => {};
   const waitForTurn = databaseOperationQueue;
   databaseOperationQueue = new Promise<void>((resolve) => {
@@ -4853,9 +4855,11 @@ async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
 
   await waitForTurn;
   try {
+    databaseOperationObserverForTest?.("acquired");
     return await runner();
   } finally {
     releaseLock();
+    databaseOperationObserverForTest?.("released");
   }
 }
 
@@ -5248,7 +5252,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         trainingContentAssetStore
       },
       loadDatabase: async () => {
-        await loadDatabase({ forceStorageRead: true });
+        await withDatabaseLock(() => loadDatabase({ forceStorageRead: true }));
       },
       migrateUserProfileAppStateNormalization
     });
@@ -28681,6 +28685,16 @@ export async function refreshDatabaseReadinessForTest(): Promise<void> {
     throw new Error("refreshDatabaseReadinessForTest is only available in test.");
   }
   await refreshDatabaseReadiness();
+}
+
+export function setDatabaseReadinessHarnessForTest(
+  storage: DatabaseStorage,
+  observer: ((phase: "queued" | "acquired" | "released") => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") throw new Error("Database readiness harness is only available in test.");
+  databaseStorage = storage;
+  databaseCache = null;
+  databaseOperationObserverForTest = observer;
 }
 
 export function getMobileUpdateWaiterCountForTest(userId: string): number {

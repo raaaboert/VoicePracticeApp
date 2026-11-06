@@ -59,4 +59,6 @@ scripts/generate_state_summary_doc.py
 *.dir.tar.gz
 *.dump
 api/db.local.json
+api/db.local.json.*.tmp
 api/db.local.*.json
+api/db.local.*.json.*.tmp

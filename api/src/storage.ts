@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { ApiDatabase } from "@voicepractice/shared";
 import { StorageProvider } from "./runtimeConfig.js";
@@ -53,7 +54,7 @@ class FileDatabaseStorage implements DatabaseStorage {
       const code = (error as { code?: string } | null)?.code;
       if (code === "ENOENT") {
         const created = this.createDefaultDatabase();
-        await fs.writeFile(this.dbPath, JSON.stringify(created, null, 2), "utf8");
+        await this.save(created);
         return created;
       }
 
@@ -72,7 +73,24 @@ class FileDatabaseStorage implements DatabaseStorage {
   }
 
   async save(db: ApiDatabase): Promise<void> {
-    await fs.writeFile(this.dbPath, JSON.stringify(db, null, 2), "utf8");
+    // File readers outside the API mutation queue (including auth identity reads)
+    // must see a complete old or new snapshot, never a truncated in-place write.
+    const temporary = `${this.dbPath}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(temporary, JSON.stringify(db, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (error) {
+      // Exclusive creation failures must not remove another writer's file.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    try {
+      await fs.rename(temporary, this.dbPath);
+    } catch (error) {
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T> {
