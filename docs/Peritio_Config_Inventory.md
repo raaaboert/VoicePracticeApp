@@ -32,11 +32,23 @@ database/R2 (provider resources).
 
 ## Authentication And Cryptography
 
-Client-IP trust is configured on the API only. Staging may deploy with fail-closed
-defaults, then verify actual peers/header behavior as described in `api/README.md`.
-Production requires verified ingress configuration; prefer CF-Connecting-IP and
-never guess Render's trusted CIDRs. Socket fallback can share limits and lock out
-legitimate users. No hosted trust settings have been verified or changed locally.
+Client-IP trust on the API affects audit/session metadata, not rate-limit identity.
+Leave trusted proxy CIDRs empty unless the immediate peer and sanitation are
+verified. No new provider configuration is required for account-based limiting;
+never guess Render ingress CIDRs. Customer OTP, platform-admin and registration
+budgets use existing durable auth tables with two-element fixed-window counters.
+Per-user counters and the public-auth overload guard remain process-local.
+Authenticated AI has four active slots per verified user, without a shared
+anonymous gate. Anonymous auto-errors have a separate 30/hour process-local
+quota; authenticated manual support does not consume it. Preserve PostgreSQL and
+the existing single API instance requirement. See api/README.md for exact policy
+and scoped lockout/overload limitations. No hosted settings were changed locally.
+
+Email operations: verify the actual Resend plan and account-wide daily/monthly
+allowance, including staging usage. The registration ceiling is not an email
+budget: rotating recipients can exhaust a 100/day allowance. Before public
+signup, size a separately approved daily new-recipient allowance with customer
+OTP headroom; see api/README.md. No hosted plan or quota was verified locally.
 
 | Variable | Purpose / owner | Default / recovery requirement |
 | --- | --- | --- |

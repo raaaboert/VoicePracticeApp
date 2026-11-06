@@ -5,7 +5,7 @@ import { Server } from "node:http";
 import { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import test, { after, before } from "node:test";
+import test, { after, before, beforeEach } from "node:test";
 
 import { ApiDatabase, createDefaultConfig, EnterpriseOrg, UserProfile } from "@voicepractice/shared";
 
@@ -24,6 +24,9 @@ let baseUrl: string;
 let server: Server;
 let originalFetch: typeof globalThis.fetch;
 let providerCalls = 0;
+let resetRateLimits: () => void;
+
+beforeEach(() => resetRateLimits());
 
 function buildOrg(): EnterpriseOrg {
   return {
@@ -203,6 +206,7 @@ before(async () => {
   delete process.env.OPENAI_MAX_DAILY_TOKENS_GLOBAL;
 
   const imported = await import("./index.js");
+  resetRateLimits = imported.clearRateLimitsForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -275,7 +279,7 @@ test("multipart parser rejects excess parts and oversized nested metadata before
   assert.equal(providerCalls, 1);
 });
 
-test("unauthenticated AI requests share one IP abuse bucket even when userId changes", async () => {
+test("unauthenticated AI requests share a fixed abuse bucket even when userId changes", async () => {
   const attackerIp = "198.51.100.40";
   for (let index = 0; index < 120; index += 1) {
     const denied = await postForm(
