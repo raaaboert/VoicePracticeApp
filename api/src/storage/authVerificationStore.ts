@@ -152,6 +152,38 @@ export class AuthVerificationStore {
     if (account.lockedUntil !== null && account.lockedUntil <= now) account.lockedUntil = null;
     account.updatedAt = now;
   }
+  /** Fixed server-owned scopes: request emails/IDs/headers cannot select a bucket.
+   * Reuses existing durable account rows, so no schema migration is necessary. */
+  async reserveAnonymousOperation(scope: "platform-admin-login" | "new-registration", testEpoch = 0): Promise<number> {
+    if (!["platform-admin-login", "new-registration"].includes(scope)) throw new Error("Invalid server abuse scope.");
+    if (testEpoch !== 0 && process.env.NODE_ENV !== "test") throw new Error("Budget reset is test-only.");
+    const key = crypto.createHmac("sha256", this.params.secret)
+      .update(JSON.stringify(["peritio.auth.abuse.v1", scope, testEpoch])).digest("hex");
+    const maximum = scope === "platform-admin-login" ? 12 : 300;
+    return this.transact(key, (state, now) => {
+      // Migration 024 caps this array at ten elements. Fixed server-owned scopes
+      // encode [windowStart, used], never an OTP account's rolling failure list.
+      const values = state.account.failures;
+      const counter = values.length === 2 && Number.isSafeInteger(values[0]) && values[0] >= 0
+        && Number.isSafeInteger(values[1]) && values[1] >= 0 && values[1] <= maximum;
+      let start: number, used: number;
+      if (counter) [start, used] = values;
+      else if (values.every(at => Number.isSafeInteger(at) && at > maximum
+        && Math.abs(at - values[0]) < WINDOW)) {
+        // Adopt legacy timestamp lists without resetting a live allowance. Starting
+        // at the latest attempt conservatively retains every still-live attempt.
+        const live = values.filter(at => at > now - WINDOW);
+        start = live.length ? Math.max(...live) : now;
+        used = Math.min(maximum, live.length);
+      } else { start = now; used = maximum; } // Malformed stored state fails closed.
+      if (now >= start + WINDOW) { start = now; used = 0; }
+      state.account.updatedAt = now;
+      state.account.failures = [start, used];
+      if (used >= maximum) return Math.max(1, Math.ceil((start + WINDOW - now) / 1000));
+      state.account.failures = [start, used + 1];
+      return 0;
+    });
+  }
   async issue(identity: VerificationIdentity): Promise<{ id: string; code: string; expiresAt: string } | null> {
     return this.transact(this.accountKey(identity.email), (state, now, authorized) => {
       const a = state.account; this.prune(a, now);

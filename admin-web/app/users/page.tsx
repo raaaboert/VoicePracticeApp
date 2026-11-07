@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppConfig,
   EnterpriseOrg,
@@ -11,7 +11,12 @@ import {
 } from "@voicepractice/shared";
 import { AdminShell } from "../../src/components/AdminShell";
 import { useRequireAdminToken } from "../../src/components/useRequireAdminToken";
-import { adminFetch } from "../../src/lib/api";
+import { adminFetch, getApiBaseUrl } from "../../src/lib/api";
+import {
+  organizationCreationStorageKey,
+  readOrganizationCreationOperation,
+  submitOrganizationCreation,
+} from "../../src/lib/organizationCreation";
 import { useAdminMode, withAdminMode } from "../../src/lib/adminMode";
 
 function formatDate(value: string | null | undefined): string {
@@ -51,6 +56,9 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(false);
   const [contentIndustries, setContentIndustries] = useState<AppConfig["industries"]>([]);
   const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
+  const [pendingCreation, setPendingCreation] = useState(false);
+  const creationStorageKey = organizationCreationStorageKey(getApiBaseUrl());
   const [exporting, setExporting] = useState(false);
   const [deletingPersonalUserId, setDeletingPersonalUserId] = useState<string | null>(null);
   const [orgForm, setOrgForm] = useState<{ name: string; contactName: string; contactEmail: string }>({
@@ -113,8 +121,24 @@ export default function UsersPage() {
     void load();
   }, [isPersonalMode]);
 
+  useEffect(() => {
+    try {
+      const pending = readOrganizationCreationOperation(sessionStorage, creationStorageKey);
+      if (pending) {
+        setOrgForm({ name: pending.payload.name, contactName: pending.payload.contactName, contactEmail: pending.payload.contactEmail });
+        setPendingCreation(true);
+        setNotice("An earlier account creation is pending. Retry to confirm its result before starting a separate creation.");
+      }
+    } catch (caught) {
+      setPendingCreation(true);
+      setError(caught instanceof Error ? caught.message : "Pending account creation could not be restored.");
+    }
+  }, [creationStorageKey]);
+
   const onCreateEnterpriseOrg = async (event: FormEvent) => {
     event.preventDefault();
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     setError(null);
     setNotice(null);
@@ -125,22 +149,44 @@ export default function UsersPage() {
         throw new Error("Company name is required.");
       }
 
-      await adminFetch<EnterpriseOrg>("/orgs", {
-        method: "POST",
-        body: JSON.stringify({
+      setPendingCreation(true);
+      await submitOrganizationCreation<EnterpriseOrg>({
+        storage: sessionStorage,
+        key: creationStorageKey,
+        createId: () => crypto.randomUUID(),
+        input: {
           name,
           contactName: orgForm.contactName,
           contactEmail: orgForm.contactEmail,
           activeIndustries: defaultIndustryId ? [defaultIndustryId] : undefined,
+        },
+        send: (operation) => adminFetch<EnterpriseOrg>("/orgs", {
+          method: "POST",
+          headers: { "Idempotency-Key": operation.id },
+          body: JSON.stringify(operation.payload),
         }),
       });
 
+      setPendingCreation(false);
       setOrgForm({ name: "", contactName: "", contactEmail: "" });
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not create enterprise account.");
     } finally {
+      creatingRef.current = false;
       setCreating(false);
+    }
+  };
+
+  const startSeparateCreation = () => {
+    if (creatingRef.current) return;
+    try {
+      sessionStorage.removeItem(creationStorageKey);
+      setPendingCreation(false);
+      setError(null);
+      setNotice("The next submission starts a separate creation. The earlier account may already exist; check the directory first.");
+    } catch {
+      setError("Pending creation could not be cleared. Retry its original request.");
     }
   };
 
@@ -243,6 +289,7 @@ export default function UsersPage() {
               <label>Company Name</label>
               <input
                 value={orgForm.name}
+                disabled={creating || pendingCreation}
                 onChange={(event) => setOrgForm((prev) => ({ ...prev, name: event.target.value }))}
                 required
               />
@@ -251,6 +298,7 @@ export default function UsersPage() {
               <label>Company Contact</label>
               <input
                 value={orgForm.contactName}
+                disabled={creating || pendingCreation}
                 onChange={(event) => setOrgForm((prev) => ({ ...prev, contactName: event.target.value }))}
               />
             </div>
@@ -258,6 +306,7 @@ export default function UsersPage() {
               <label>Contact Email</label>
               <input
                 value={orgForm.contactEmail}
+                disabled={creating || pendingCreation}
                 onChange={(event) => setOrgForm((prev) => ({ ...prev, contactEmail: event.target.value }))}
               />
             </div>
@@ -270,8 +319,13 @@ export default function UsersPage() {
                 form="create-enterprise-account-form"
                 disabled={creating}
               >
-                {creating ? "Creating..." : "Create Enterprise Account"}
+                {creating ? "Creating..." : pendingCreation ? "Retry Enterprise Account Creation" : "Create Enterprise Account"}
               </button>
+              {pendingCreation ? (
+                <button type="button" onClick={startSeparateCreation} disabled={creating}>
+                  Start a separate creation
+                </button>
+              ) : null}
             </div>
           </div>
           <p className="small" style={{ marginBottom: 0 }}>

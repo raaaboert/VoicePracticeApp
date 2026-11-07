@@ -602,6 +602,7 @@ test("real PostgreSQL assignment-mode catalog, launch, attribution, and revocati
       const masterCall = async (path: string, method: "GET" | "POST" | "PATCH" | "DELETE", body?: Record<string, unknown>) => {
         const response = await fetch(base + path, { method,
           headers: { Authorization: `Bearer ${masterToken}`,
+            ...(path === "/orgs" && method === "POST" ? { "Idempotency-Key": randomUUID() } : {}),
             ...(body ? { "Content-Type": "application/json" } : {}) },
           ...(body ? { body: JSON.stringify(body) } : {}) });
         return { status: response.status, body: await response.json() as Record<string, unknown> };

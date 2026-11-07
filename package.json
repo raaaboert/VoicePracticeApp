@@ -2,6 +2,9 @@
   "name": "voicepracticeapp-monorepo",
   "private": true,
   "version": "1.0.0",
+  "engines": {
+    "node": "24.x"
+  },
   "workspaces": [
     "mobile",
     "admin-web",
@@ -11,7 +14,11 @@
   ],
   "overrides": {
     "expo": "57.0.26",
-    "react-native": "0.86.3"
+    "react-native": "0.86.3",
+    "express": {
+      "body-parser": "1.20.9",
+      "proxy-addr": "2.0.8"
+    }
   },
   "scripts": {
     "start:mobile": "npm run build --workspace shared && npm run start --workspace mobile",
@@ -28,6 +35,7 @@
     "build:peritio": "npm run build --workspace shared && npm run build --workspace peritio-web",
     "db:sanitize-bootstrap": "npm run db:sanitize-bootstrap --workspace api --",
     "backup:reconcile-training-content": "npm run backup:reconcile-training-content --workspace api --",
+    "backup:postgres": "npm run backup:postgres --workspace api --",
     "smoke:stack": "node scripts/smoke-stack.mjs",
     "test:critical-flow": "node scripts/test-critical-flow.mjs",
     "verify:fast": "npm run build --workspace shared && npm run build --workspace api && npm run test --workspace api && npm run build --workspace admin-web && npm run test --workspace admin-web && npm run build --workspace peritio-web && npm run test --workspace peritio-web && npm run test --workspace mobile && npx tsc --noEmit -p mobile/tsconfig.json",

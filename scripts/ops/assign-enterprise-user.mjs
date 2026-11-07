@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import {
   assertProductionWriteAllowed,
   inferApiTargetEnvironment,
@@ -192,6 +193,7 @@ async function main() {
       "/orgs",
       {
         method: "POST",
+        headers: { "Idempotency-Key": randomUUID() },
         body: JSON.stringify({
           name: orgName,
           contactName: "Rob Bautel",

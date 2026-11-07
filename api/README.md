@@ -44,6 +44,7 @@ Express API for Phase 1 development.
 - `GET /support/cases` (admin)
 - `GET /support/cases/:caseId` (admin)
 - `GET /orgs` / `POST /orgs` / `PATCH /orgs/:orgId` (admin)
+  - `POST /orgs` requires a UUID-v4 `Idempotency-Key` header.
 
 ## Environment
 
@@ -99,6 +100,119 @@ OPENAI_MAX_DAILY_TOKENS_PER_USER=
 OPENAI_MAX_DAILY_TOKENS_GLOBAL=
 SUPPORT_TRANSCRIPT_SECRET=replace_me_for_production
 ```
+
+## Client IP metadata and rate-limit identity
+
+Rate-limit security does not depend on proxy IP attribution. Render/Vercel egress
+may be shared by unrelated users; neither that peer nor caller-supplied XFF/CF
+headers selects a customer quota. No new provider setting or infrastructure is
+required. Keep the existing single API instance deployment requirement: the
+short-term request/overload counters below are process-local.
+
+- Dashboard/mobile OTP issuance and verification retain the existing durable
+  AuthVerificationStore account/challenge protections: 5 issuances/15 minutes,
+  60-second issuance cooldown, 5 wrong attempts per challenge, and 10 eligible
+  failures/15 minutes per account. Invalid or absent challenges do not issue sessions.
+- Platform-admin password login has one server-owned durable budget of 12
+  attempts per fixed 15-minute window, including successes. It protects the single
+  shared platform-admin credential independently of forged headers or restarts.
+  An attacker can temporarily exhaust that credential's budget; existing admin
+  sessions and customer OTP sign-in remain separate. This does not provide DoS
+  immunity or replace strong admin credentials.
+- New mobile registrations have a separate durable global budget of 300 per fixed
+  15-minute window. Rotating emails cannot create unlimited accounts. Exhaustion
+  delays new registrations; existing accounts use their own OTP budgets. Admission
+  is reserved once before the app-state write phase, so denied requests never
+  republish app_state. Reservations count even if a later write fails.
+- Public authentication routes share a short token bucket: burst 200, refill
+  100/second, maximum 16 active requests. It does not gate authenticated AI.
+  Saturation returns 429 with Retry-After: 1. This public-authentication overload
+  guard sheds traffic globally; capacity is an initial policy choice, not a
+  load-tested availability guarantee.
+- Anonymous /mobile/public/support/errors has a process-local global quota of
+  30 requests per fixed hour, with an accurate Retry-After. All attempts count,
+  including invalid reports. Authenticated /mobile/users/:userId/support/cases
+  does not use that quota. Anonymous auto-error reporting can be starved during
+  an attack; authenticated manual support remains separate. Restart resets the
+  anonymous quota.
+- Invalid/missing AI credentials share a fixed anonymous 120/15-minute bucket.
+  Exhausting it does not reject valid AI users. Authenticated AI limits remain
+  120/verified user/15 minutes across AI routes, with existing usage controls
+  unchanged. At most four AI HTTP requests may be active per verified user;
+  other users and anonymous floods cannot spend those slots. Slots release on
+  response finish/close, including aborts. Both AI and public-auth slot guards
+  attach these listeners, then immediately check response.destroyed: an already
+  disconnected response releases its slot and returns without calling next.
+  Release is idempotent, including when both finish and close occur.
+  Multipart limits, provider deadlines,
+  entitlements and accounting remain in place. No shared authenticated-AI gate
+  or new spending cap is introduced. This is per-user isolation, not unlimited
+  total server capacity.
+- Upload/finalization/access limits are 120/verified user/15 minutes (one shared
+  principal for platform-admin tokens). Authentication runs before consumption.
+  Mobile verification/resend and organization joins use verified users, 20/15
+  minutes; reviewer verification retains its separate existing 20-attempt quota.
+  Scenario generation retains its existing verified organization/actor quota.
+
+The durable budgets reuse existing auth_verification_accounts transactions and
+rows; no new migration is needed. Fixed server-owned budget rows encode
+[windowStart, used] in failure_times, within migration 024's ten-element bound.
+Legacy timestamp-list budget rows are conservatively adopted; malformed state
+fails closed for one window. Ordinary OTP failure lists remain unchanged.
+PostgreSQL provides durable serialized account
+state. File storage remains local-development-only. Short-term per-user and
+anonymous counters reset on process restart, as before; do not treat them as
+cluster-wide or durable spending controls. Anonymous overload can still delay
+legitimate requests during an attack. Account-targeted OTP lockout remains scoped
+to the attacked account, rather than a shared proxy's customers.
+
+Email quota exposure is separate from request throttling. A new registration can
+send a verification email; unverified addresses can request further codes under
+account issuance/cooldown limits. Rotating emails can produce up to 300 first
+emails per window. Unknown dashboard accounts send no mail, but attackers who
+know existing addresses can consume their issuance allowances. Confirmed delivery
+failures refund only the failed issuance; ambiguous or confirmed sends remain
+debited. These controls do not establish a provider-wide daily email budget.
+
+Operational requirement before public signup: verify the actual Resend plan,
+remaining daily/monthly allowance and shared staging/production usage; do not
+assume Free. At a stated allowance of 100/day, 300/15 minutes is insufficient.
+The smallest additional application protection to approve separately is an atomic
+daily allowance for unauthenticated new-recipient verification sends, sized from
+the verified plan and normal signup volume, leaving headroom for customer OTP.
+Do not impose an unverified shared 100-email cap on all customer sign-ins.
+Monitor remaining quota and delivery failures. Targeted abuse of known accounts
+remains an availability risk even with a new-recipient allowance. This batch
+does not claim to solve daily email quota exhaustion and adds no paid service.
+
+For **audit/session IP metadata**, the API ignores forwarded headers by default,
+uses the socket peer and leaves Express trust proxy disabled. Private/loopback
+addresses are not automatically trusted. Invalid proxy settings stop startup.
+Ignored forwarded headers generate a fixed, non-sensitive warning at most once
+per five minutes per process when metadata resolution is exercised.
+
+- CLIENT_IP_TRUSTED_PROXY_CIDRS: explicit, operator-verified immediate proxy
+  addresses/CIDRs, empty by default. Do not guess Render CIDRs, trust generic
+  private networks, or use outbound ranges as an ingress allowlist.
+- CLIENT_IP_PROXY_HEADER: x-forwarded-for (default) or cf-connecting-ip.
+  Trust CF only if the immediate peer and header sanitation are independently
+  verified, including private/direct bypass paths and Worker exceptions.
+  Otherwise leave trust empty; metadata will describe the peer.
+
+Render's [PocketBase guidance](https://render.com/articles/host-pocketbase-on-render)
+recommends CF-Connecting-IP, but its [private-network documentation](https://render.com/docs/private-network)
+allows same-workspace private service access and describes changing instance IPs.
+[Cloudflare documents](https://developers.cloudflare.com/fundamentals/reference/http-headers/)
+header rewriting and Worker exceptions. These do not establish a verified trusted
+ingress CIDR boundary for this deployment. The dashboard server constructs its
+own API headers and does not relay browser IPs; forwarding browser headers is
+unnecessary for rate-limit identity.
+
+Before production, narrowly review this policy, then verify in staging that two
+customer accounts sharing a peer remain isolated, forged headers/claimed IDs
+cannot reset quotas, and an authenticated AI user survives an exhausted anonymous
+pool. Keep hosted checks low-volume; focused offline regressions cover exhaustion.
+Do not enable forwarded-header trust merely to pass this gate.
 
 ## Notes
 

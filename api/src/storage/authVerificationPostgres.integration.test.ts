@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 import { AuthVerificationStore, type VerificationIdentity } from "./authVerificationStore.js";
 import { createLocalAuthDatabase } from "./authVerificationTestDatabase.js";
@@ -21,6 +22,67 @@ test("PostgreSQL authentication migration, rolling limits and cross-instance con
     await t.test("missing schema fails closed; fresh migration and repeated initialization succeed", async () => {
       await assert.rejects(a.initialize(), /auth_verification_accounts/);
       await db.migrate(); await a.initialize(); await db.migrate(); await b.initialize();
+    });
+    const budgetKey = (scope: string) => crypto.createHmac("sha256", params.secret)
+      .update(JSON.stringify(["peritio.auth.abuse.v1", scope, 0])).digest("hex");
+    const clearBudget = (scope: string) => db.pool.query("DELETE FROM auth_verification_accounts WHERE account_key=$1", [budgetKey(scope)]);
+    const budgetState = async (scope: string) => (await db.pool.query(
+      "SELECT failure_times FROM auth_verification_accounts WHERE account_key=$1", [budgetKey(scope)])).rows[0].failure_times;
+    await t.test("real migration rejects eleven timestamps; fixed counters allow admin attempts 10, 11, 12 and reject 13", async () => {
+      await assert.rejects(db.pool.query("INSERT INTO auth_verification_accounts(account_key,failure_times) VALUES ($1,$2::jsonb)",
+        ["f".repeat(64), JSON.stringify(Array(11).fill(now))]), (e: any) => e.code === "23514");
+      const start = now;
+      for (let attempt = 1; attempt <= 12; attempt++) {
+        assert.equal(await (attempt % 2 ? a : b).reserveAnonymousOperation("platform-admin-login"), 0, `admin attempt ${attempt}`);
+        if (attempt >= 10) assert.deepEqual(await budgetState("platform-admin-login"), [start, attempt]);
+      }
+      assert.equal(await b.reserveAnonymousOperation("platform-admin-login"), 900);
+      const restarted = new AuthVerificationStore(params);
+      try { assert.equal(await restarted.reserveAnonymousOperation("platform-admin-login"), 900); }
+      finally { await restarted.close(); }
+      now = start + 15 * 60_000 - 1;
+      assert.equal(await a.reserveAnonymousOperation("platform-admin-login"), 1);
+      now++;
+      assert.equal(await b.reserveAnonymousOperation("platform-admin-login"), 0);
+      assert.deepEqual(await budgetState("platform-admin-login"), [now, 1]);
+    });
+    await t.test("atomic cross-instance counters enforce admin 12 and registrations 299/300/301 without schema errors", async () => {
+      await clearBudget("platform-admin-login");
+      const admin = await Promise.all(Array.from({ length: 32 }, (_, i) => (i % 2 ? a : b).reserveAnonymousOperation("platform-admin-login")));
+      assert.equal(admin.filter(n => n === 0).length, 12);
+      assert.deepEqual(await budgetState("platform-admin-login"), [now, 12]);
+      for (let i = 1; i <= 299; i++) assert.equal(await a.reserveAnonymousOperation("new-registration"), 0, `registration ${i}`);
+      assert.deepEqual(await budgetState("new-registration"), [now, 299]);
+      const registrations = await Promise.all(Array.from({ length: 16 }, (_, i) => (i % 2 ? a : b).reserveAnonymousOperation("new-registration")));
+      assert.equal(registrations.filter(n => n === 0).length, 1, "only registration 300 is admitted");
+      assert.deepEqual(await budgetState("new-registration"), [now, 300]);
+      assert.equal(await a.reserveAnonymousOperation("new-registration"), 900, "registration 301 is rejected");
+      now += 15 * 60_000;
+      assert.equal(await b.reserveAnonymousOperation("new-registration"), 0);
+    });
+    await t.test("legacy budget rows retain live attempts and malformed state fails closed then expires", async () => {
+      const legacy = Array.from({ length: 10 }, (_, i) => now - 1000 + i);
+      await db.pool.query("UPDATE auth_verification_accounts SET failure_times=$2::jsonb WHERE account_key=$1",
+        [budgetKey("platform-admin-login"), JSON.stringify(legacy)]);
+      assert.equal(await a.reserveAnonymousOperation("platform-admin-login"), 0);
+      assert.deepEqual(await budgetState("platform-admin-login"), [legacy[9], 11]);
+      assert.equal(await b.reserveAnonymousOperation("platform-admin-login"), 0);
+      assert.ok(await a.reserveAnonymousOperation("platform-admin-login") > 0);
+      await db.pool.query("UPDATE auth_verification_accounts SET failure_times=$2::jsonb WHERE account_key=$1",
+        [budgetKey("platform-admin-login"), JSON.stringify([now, 13])]);
+      assert.equal(await a.reserveAnonymousOperation("platform-admin-login"), 900);
+      now += 15 * 60_000;
+      assert.equal(await b.reserveAnonymousOperation("platform-admin-login"), 0);
+    });
+    await t.test("failed PostgreSQL counter publication rolls back without spending admission", async () => {
+      await clearBudget("platform-admin-login");
+      await db.pool.query(`CREATE FUNCTION reject_budget() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'controlled budget failure'; END $$;
+        CREATE TRIGGER reject_budget BEFORE UPDATE ON auth_verification_accounts FOR EACH ROW EXECUTE FUNCTION reject_budget()`);
+      try { await assert.rejects(a.reserveAnonymousOperation("platform-admin-login"), /controlled budget failure/); }
+      finally { await db.pool.query("DROP TRIGGER reject_budget ON auth_verification_accounts; DROP FUNCTION reject_budget()"); }
+      assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM auth_verification_accounts WHERE account_key=$1", [budgetKey("platform-admin-login")])).rows[0].n, 0);
+      assert.equal(await b.reserveAnonymousOperation("platform-admin-login"), 0);
+      assert.deepEqual(await budgetState("platform-admin-login"), [now, 1]);
     });
     await t.test("valid code concurrently succeeds once across independent instances and cannot replay", async () => {
       const id = who("consume"), c = await send(id);

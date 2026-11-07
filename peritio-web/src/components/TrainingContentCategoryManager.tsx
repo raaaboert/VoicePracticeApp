@@ -122,9 +122,9 @@ export function TrainingContentCategoryManager({
       setOrderRevision(response.orderRevision);
       setNewName("");
       setNewDescription("");
-      setMessage("Content Category created.");
+      setMessage("Library Category created.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not create Content Category.");
+      setError(caught instanceof Error ? caught.message : "Could not create Library Category.");
     } finally {
       setSaving(false);
     }
@@ -165,9 +165,9 @@ export function TrainingContentCategoryManager({
       );
       setOrderRevision(response.orderRevision);
       setEditingId(null);
-      setMessage("Content Category updated.");
+      setMessage("Library Category updated.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update Content Category.");
+      setError(caught instanceof Error ? caught.message : "Could not update Library Category.");
     } finally {
       setSaving(false);
     }
@@ -206,9 +206,9 @@ export function TrainingContentCategoryManager({
       setCategories([...response.categories, ...archived]);
       setSavedActiveIds(ids(response.categories));
       setOrderRevision(response.orderRevision);
-      setMessage("Content Category order saved.");
+      setMessage("Library Category order saved.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not save Content Category order.");
+      setError(caught instanceof Error ? caught.message : "Could not save Library Category order.");
     } finally {
       setSaving(false);
     }
@@ -251,12 +251,12 @@ export function TrainingContentCategoryManager({
       setOrderRevision(response.orderRevision);
       setArchiveTarget(null);
       setMessage(
-        `Content Category archived. ${response.movedItemCount ?? 0} item${
+        `Library Category archived. ${response.movedItemCount ?? 0} item${
           response.movedItemCount === 1 ? "" : "s"
         } moved.`
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not archive Content Category.");
+      setError(caught instanceof Error ? caught.message : "Could not archive Library Category.");
     } finally {
       setSaving(false);
     }
@@ -281,7 +281,7 @@ export function TrainingContentCategoryManager({
         <div className="section-header">
           <div>
             <p className="eyebrow">New category</p>
-            <h2>Add Content Category</h2>
+            <h2>Add Library Category</h2>
           </div>
         </div>
         <form className="training-content-category-create" onSubmit={createCategory}>
@@ -423,12 +423,12 @@ export function TrainingContentCategoryManager({
                       className="icon-button danger-button"
                       type="button"
                       title={category.isDefault
-                        ? "The default Content Category cannot be archived"
+                        ? "The default Library Category cannot be archived"
                         : orderDirty
                           ? "Save the category order before archiving"
                         : `Archive ${category.name}`}
                       aria-label={category.isDefault
-                        ? "The default Content Category cannot be archived"
+                        ? "The default Library Category cannot be archived"
                         : orderDirty
                           ? "Save the category order before archiving"
                         : `Archive ${category.name}`}

@@ -91,7 +91,8 @@ export class R2TrainingContentBackupStorage implements TrainingContentBackupObje
       await this.client.send(command, { abortSignal: params.signal });
       return "copied";
     } catch (error) {
-      if (isPreconditionFailedError(error)) {
+      if (isDestinationConflict(error) && await this.headObject(destinationKey, params.signal)) {
+        // The caller must still validate metadata before recording completion.
         return "already_present";
       }
       throw error;
@@ -177,10 +178,12 @@ function isNotFoundError(error: unknown): boolean {
     || candidate?.$metadata?.httpStatusCode === 404;
 }
 
-function isPreconditionFailedError(error: unknown): boolean {
-  const candidate = error as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
+function isDestinationConflict(error: unknown): boolean {
+  const candidate = error as { name?: string; Code?: string; $metadata?: { httpStatusCode?: number } } | null;
   return candidate?.name === "PreconditionFailed"
-    || candidate?.$metadata?.httpStatusCode === 412;
+    || candidate?.$metadata?.httpStatusCode === 412
+    || (candidate?.$metadata?.httpStatusCode === 409
+      && (candidate.name === "ObjectLockedByBucketPolicy" || candidate.Code === "ObjectLockedByBucketPolicy"));
 }
 
 export function createTrainingContentBackupStorage(

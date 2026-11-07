@@ -11,7 +11,7 @@ import {
   Video,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useId, useState } from "react";
 import type {
   CreateDashboardTrainingContentRequest,
   DashboardTrainingContentCategory,
@@ -62,6 +62,8 @@ export function TrainingContentCreateForm({
   scenarioOptions: DashboardTrainingContentScenarioOption[];
 }) {
   const router = useRouter();
+  const categorySelectId = useId();
+  const categoryHelpId = `${categorySelectId}-help`;
   const defaultCategoryId = categories.find((category) => category.isDefault)?.id
     ?? categories[0]?.id
     ?? "";
@@ -115,7 +117,7 @@ export function TrainingContentCreateForm({
       return;
     }
     if (!categoryId) {
-      setError("Select a Content Category.");
+      setError("Select a Library Category.");
       return;
     }
     setSaving(true);
@@ -228,9 +230,11 @@ export function TrainingContentCreateForm({
                   disabled={saving}
                 />
               </label>
-              <label className="field-label">
-                Content Category
+              <div className="field-label">
+                <label htmlFor={categorySelectId}>Library Category</label>
                 <select
+                  id={categorySelectId}
+                  aria-describedby={categoryHelpId}
                   className="text-input"
                   value={categoryId}
                   onChange={(event) => setCategoryId(event.target.value)}
@@ -243,7 +247,10 @@ export function TrainingContentCreateForm({
                     </option>
                   ))}
                 </select>
-              </label>
+                <small id={categoryHelpId} className="muted-copy training-content-category-help">
+                  Organizes resources in your library. The default category is selected automatically.
+                </small>
+              </div>
               <TrainingContentTopicSelector options={focusTopics} selectedIds={focusTopicIds}
                 onChange={setFocusTopicIds} disabled={saving} error={topicLoadError} onRetry={() => router.refresh()} />
               <TrainingContentScenarioSelector
@@ -302,7 +309,7 @@ export function TrainingContentCreateForm({
           ) : null}
 
           {error ? <div className="notice danger">{error}</div> : null}
-          <div className="training-content-sticky-actions">
+          <div className="training-content-create-actions">
             <button
               type="button"
               className="ghost-button"

@@ -179,6 +179,7 @@ function buildHarness() {
   });
   return {
     cleanup,
+    config,
     calls,
     expired,
     readyWithTemp,
@@ -204,6 +205,19 @@ test("Training Content cleanup is dry-run by default and performs zero writes", 
     markFinalDeleted: 0,
     deletedKeys: [],
   });
+});
+
+test("backup-enabled cleanup preserves unprotected superseded content but still removes temporary files", async () => {
+  const h = buildHarness();
+  h.config.backup.enabled = true;
+  const report = await h.cleanup.run({ apply: true, now: NOW });
+  assert.equal(h.calls.deletedKeys.includes(h.superseded.finalObjectKey!), false);
+  assert.equal(h.calls.deletedKeys.includes(h.expired.temporaryObjectKey!), true);
+  assert.equal(h.calls.deletedKeys.includes(h.readyWithTemp.temporaryObjectKey!), true);
+  assert.equal(report.errors.some(e => e.category === "backup_required"), true);
+  h.superseded.backedUpAt = NOW.toISOString();
+  await h.cleanup.run({ apply: true, now: NOW });
+  assert.equal(h.calls.deletedKeys.includes(h.superseded.finalObjectKey!), true);
 });
 
 test("applied cleanup handles terminal objects and never deletes a current ready asset", async () => {

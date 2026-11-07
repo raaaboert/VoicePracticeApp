@@ -85,15 +85,18 @@ test("Training Content editor guards destructive actions, conflicts, and duplica
 });
 
 test("Training Content forms separate categories from optional Focus Topics and hide raw order", () => {
+  assert.equal(createSource.includes("Library Category"), true);
+  assert.equal(createSource.includes("Organizes resources in your library. The default category is selected automatically."), true);
+  assert.equal(editorSource.includes("Library Category"), true);
   for (const source of [createSource, editorSource]) {
-    assert.equal(source.includes("Content Category"), true);
     assert.equal(source.includes("<TrainingContentTopicSelector"), true);
     assert.equal(source.includes("Display order"), false);
     assert.equal(source.includes("beforeunload"), true);
     assert.equal(source.includes("<UnsavedChangesDialog"), true);
     assert.equal(source.includes("Back to Learning Resources"), true);
-    assert.equal(source.includes("training-content-sticky-actions"), true);
   }
+  assert.equal(createSource.includes("training-content-create-actions"), true);
+  assert.equal(editorSource.includes("training-content-sticky-actions"), true);
   assert.equal(createSource.includes("required"), true);
   assert.equal(createSource.includes("Cancel"), true);
   assert.equal(editorSource.includes("Close"), true);
@@ -120,7 +123,7 @@ test("Training Content library supplies authorized categories and filters to its
   assert.equal(librarySource.includes("getDashboardTrainingContentCategories"), true);
   assert.equal(librarySource.includes("getDashboardTrainingContentFocusTopics"), true);
   assert.equal(librarySource.includes("getDashboardTrainingContent({"), false);
-  assert.equal(libraryClientSource.includes("Content Category"), true);
+  assert.equal(libraryClientSource.includes("Library Category"), true);
   assert.equal(libraryClientSource.includes("Related Focus Topic"), true);
   assert.equal(librarySource.includes("Manage Categories"), true);
   assert.equal(librarySource.includes("Reorder Content"), true);
@@ -176,7 +179,7 @@ test("category and content ordering use accessible controls and optimistic revis
   assert.equal(categoriesSource.includes("Move ${category.name} down"), true);
   assert.equal(categoriesSource.includes("expectedOrderRevision"), true);
   assert.equal(categoriesSource.includes("destinationCategoryId"), true);
-  assert.equal(categoriesSource.includes("The default Content Category cannot be archived"), true);
+  assert.equal(categoriesSource.includes("The default Library Category cannot be archived"), true);
   assert.equal(reorderSource.includes("Move ${item.title} up"), true);
   assert.equal(reorderSource.includes("Move ${item.title} down"), true);
   assert.equal(reorderSource.includes("Move to category"), true);

@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
+import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
 const IS_WINDOWS = process.platform === "win32";
-const NPM_CMD = IS_WINDOWS ? "npm.cmd" : "npm";
 const TASKKILL_CMD = IS_WINDOWS ? "taskkill" : null;
 
 function nowLabel() {
@@ -30,10 +31,6 @@ function signalProcessTree(child, signal) {
   }
 
   child.kill(signal);
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function stopProcess(child, name) {
@@ -65,10 +62,11 @@ async function stopProcess(child, name) {
   log(`${name}: stopped`);
 }
 
-async function fetchWithRetry(url, timeoutMs) {
+async function fetchWithRetry(url, timeoutMs, child) {
   const startedAt = Date.now();
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
+    if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error("Critical Flow API exited before becoming healthy.");
     try {
       const response = await fetch(url);
       return response;
@@ -104,9 +102,10 @@ async function findAvailablePort(startPort, maxAttempts = 20) {
   throw new Error(`No available port found in range ${startPort}-${startPort + maxAttempts - 1}.`);
 }
 
-async function waitForReady(baseUrl, timeoutMs) {
+async function waitForReady(baseUrl, timeoutMs, child) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error("Critical Flow API exited before becoming ready.");
     try {
       const response = await fetch(`${baseUrl}/ready`);
       if (response.ok) {
@@ -141,6 +140,9 @@ async function apiRequest(baseUrl, pathName, options = {}) {
 
   const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
   const headers = {};
+  if (method === "POST" && pathName === "/orgs") {
+    headers["Idempotency-Key"] = randomUUID();
+  }
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
@@ -168,45 +170,39 @@ async function apiRequest(baseUrl, pathName, options = {}) {
   return payload;
 }
 
-function extractLatestVerificationCode(logs, email) {
-  const joined = logs.join("");
-  const regex = new RegExp(`\\[email-verification\\]\\s+${escapeRegExp(email)}\\s+code=(\\d{6})`, "gi");
-  let match = regex.exec(joined);
-  let latest = null;
-  while (match) {
-    latest = match[1];
-    match = regex.exec(joined);
-  }
-  return latest;
-}
-
-async function waitForVerificationCode(logs, email, timeoutMs) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const code = extractLatestVerificationCode(logs, email);
-    if (code) {
-      return code;
-    }
-    await delay(250);
-  }
-  throw new Error(`Timed out waiting for email verification code for ${email}.`);
-}
-
 async function main() {
+  if (["staging", "stage", "production", "prod"].includes(process.env.PERITIO_ENV?.toLowerCase())
+    || process.env.NODE_ENV === "production"
+    || ["RENDER", "RENDER_SERVICE_ID", "RENDER_GIT_COMMIT", "VERCEL", "VERCEL_ENV"].some(key => Object.hasOwn(process.env, key))) {
+    throw new Error("Critical Flow is an offline test and cannot run in hosted application environments.");
+  }
   const cwd = process.cwd();
   const port = await findAvailablePort(4176);
-  const baseUrl = `http://localhost:${port}`;
+  const baseUrl = `http://127.0.0.1:${port}`;
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "voicepractice-critical-flow-"));
   const dbPath = path.join(tempDir, "db.json");
-  const logs = [];
+  const codes = new Map();
   const useBuiltApi = process.env.GITHUB_ACTIONS === "true" || process.env.CI === "true";
-  const apiScript = useBuiltApi ? "start" : "dev";
+  const inherited = {};
+  for (const key of ["SystemRoot", "WINDIR", "PATH", "ComSpec", "PATHEXT", "LOCALAPPDATA", "USERPROFILE", "APPDATA", "TEMP", "TMP"]) {
+    if (process.env[key]) inherited[key] = process.env[key];
+  }
   const apiEnv = {
-    ...process.env,
+    ...inherited,
     PORT: String(port),
     STORAGE_PROVIDER: "file",
     DB_PATH: dbPath,
-    NODE_ENV: "development",
+    NODE_ENV: "test",
+    PERITIO_ENV: "development",
+    CRITICAL_FLOW_FIXTURE: "1",
+    CRITICAL_FLOW_TEMP_DIR: tempDir,
+    TSX_DISABLE_CACHE: "1",
+    AUTH_CODE_DELIVERY_PROVIDER: "log_only",
+    WEB_AUTH_CODE_DELIVERY_PROVIDER: "log_only",
+    MOBILE_EMAIL_VERIFICATION_DELIVERY_PROVIDER: "log_only",
+    MOBILE_REVERIFY_ON_ONBOARD: "true",
+    TRAINING_CONTENT_STORAGE_PROVIDER: "disabled",
+    ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false",
     ADMIN_BOOTSTRAP_PASSWORD: "admin",
     ADMIN_TOKEN_SECRET: "local-critical-flow-admin-token-secret",
     WEB_AUTH_TOKEN_SECRET: "local-critical-flow-web-auth-token-secret",
@@ -215,35 +211,35 @@ async function main() {
   };
 
   log("Starting API for critical-flow test...");
-  const api = IS_WINDOWS
-    ? spawn("cmd.exe", ["/d", "/s", "/c", `${NPM_CMD} run ${apiScript} --workspace api`], {
-        cwd,
-        shell: false,
-        env: apiEnv,
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-    : spawn(NPM_CMD, ["run", apiScript, "--workspace", "api"], {
-        cwd,
-        detached: true,
-        shell: false,
-        env: apiEnv,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+  const api = spawn(process.execPath, [
+    ...(!useBuiltApi ? ["--import", new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url).href] : []),
+    fileURLToPath(new URL("./critical-flow-test-server.mjs", import.meta.url)), useBuiltApi ? "--built" : "--source",
+  ], { cwd, detached: !IS_WINDOWS, windowsHide: true, env: apiEnv, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  api.on("message", message => {
+    if (message?.kind === "verification-code" && typeof message.email === "string"
+      && typeof message.code === "string" && /^\d{6}$/.test(message.code)) codes.set(message.email.toLowerCase(), message.code);
+  });
 
   api.stdout.on("data", (chunk) => {
     const text = chunk.toString("utf8");
     process.stdout.write(`[api] ${text}`);
-    logs.push(text);
   });
   api.stderr.on("data", (chunk) => {
     const text = chunk.toString("utf8");
     process.stderr.write(`[api] ${text}`);
-    logs.push(text);
   });
 
   try {
-    await fetchWithRetry(`${baseUrl}/health`, 45_000);
-    await waitForReady(baseUrl, 45_000);
+    await new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timeout); api.off("message", ready); api.off("exit", exited); api.off("error", failed); };
+      const ready = message => { if (message?.kind === "ready" && message.port === port) { cleanup(); resolve(); } };
+      const exited = () => { cleanup(); reject(new Error("Isolated Critical Flow API exited before its readiness handshake.")); };
+      const failed = () => { cleanup(); reject(new Error("Isolated Critical Flow API could not start.")); };
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("Isolated Critical Flow API readiness timed out.")); }, 45_000);
+      api.on("message", ready); api.once("exit", exited); api.once("error", failed);
+    });
+    await fetchWithRetry(`${baseUrl}/health`, 45_000, api);
+    await waitForReady(baseUrl, 45_000, api);
     log("API is healthy and ready.");
 
     log("Logging in as platform admin...");
@@ -297,8 +293,21 @@ async function main() {
       throw new Error("Expected verificationRequired=true for newly onboarded user.");
     }
 
-    log("Waiting for verification code in API logs...");
-    const verificationCode = await waitForVerificationCode(logs, onboardingEmail, 20_000);
+    log("Receiving generated verification code through private test IPC...");
+    const verificationCode = await new Promise((resolve, reject) => {
+      const accept = message => {
+        if (message?.kind === "verification-code" && typeof message.email === "string"
+          && message.email.toLowerCase() === onboardingEmail && codes.has(onboardingEmail)) finish();
+      };
+      const timeout = setTimeout(() => { api.off("message", accept); reject(new Error("Test OTP delivery did not arrive.")); }, 5000);
+      const finish = () => { clearTimeout(timeout); api.off("message", accept); const code = codes.get(onboardingEmail); codes.delete(onboardingEmail); resolve(code); };
+      if (codes.has(onboardingEmail)) finish();
+      else api.on("message", accept);
+    });
+
+    await apiRequest(baseUrl, "/mobile/onboard/verify-email", { method: "POST", mobileToken: interimMobileToken,
+      body: { userId, code: String((Number(verificationCode) + 1) % 1_000_000).padStart(6, "0"),
+        firstName: onboardingFirstName, lastName: onboardingLastName }, expectedStatus: 400 });
 
     log("Verifying email...");
     const verify = await apiRequest(baseUrl, "/mobile/onboard/verify-email", {
@@ -410,12 +419,9 @@ async function main() {
 
     log("Critical-flow test passed.");
   } finally {
+    codes.clear();
     await stopProcess(api, "api");
-    try {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    } catch {
-      // Ignore cleanup failures.
-    }
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
 

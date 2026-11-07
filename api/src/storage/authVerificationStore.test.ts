@@ -9,6 +9,27 @@ import { deliverVerificationChallenge } from "../services/authVerification.js";
 import { AuthCodeDeliveryError } from "../services/authCodeDelivery.js";
 
 const secret = "authentication_test_secret_of_at_least_32_characters";
+
+test("server-owned admin and registration budgets persist across instances, stay bounded and expire", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "auth-abuse-budget-"));
+  let now = Date.now();
+  const params = { provider: "file" as const, dbPath: path.join(dir, "db.json"), databaseUrl: null, secret,
+    pgPoolMax: 1, pgConnectTimeoutMs: 1000, pgIdleTimeoutMs: 100, clock: () => now };
+  const first = new AuthVerificationStore(params), reopened = new AuthVerificationStore(params);
+  try {
+    const reservations = await Promise.all(Array.from({ length: 13 }, (_, i) =>
+      (i % 2 ? first : reopened).reserveAnonymousOperation("platform-admin-login")));
+    assert.equal(reservations.filter(retry => retry === 0).length, 12);
+    assert.ok(await reopened.reserveAnonymousOperation("platform-admin-login") > 0);
+    for (let i = 0; i < 300; i++) assert.equal(await reopened.reserveAnonymousOperation("new-registration"), 0);
+    assert.ok(await first.reserveAnonymousOperation("new-registration") > 0);
+    // Existing account issuance uses a separate namespace from anonymous budgets.
+    assert.ok(await first.issue({ email: "separate@example.test", userId: "separate", orgId: null, purpose: "sign_in" }));
+    now += 15 * 60_000 + 1;
+    assert.equal(await first.reserveAnonymousOperation("platform-admin-login"), 0);
+    assert.equal(await reopened.reserveAnonymousOperation("new-registration"), 0);
+  } finally { await first.close(); await reopened.close(); await rm(dir, { recursive: true, force: true }); }
+});
 const identity: VerificationIdentity = { userId: "user_1", email: "Test@Example.test", orgId: "org_1", purpose: "email_verification" };
 test("durable local challenge is scoped, hashed and consumable once including reviewer exception", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "auth-store-"));

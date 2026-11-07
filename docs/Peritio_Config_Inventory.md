@@ -1,7 +1,7 @@
 # Peritio Configuration Inventory
 
 This inventory records configuration names and recovery significance. It
-contains no values. Secret values belong only in the approved provider secret
+contains no secret values. Secret values belong only in the approved provider secret
 store; never put them in Git, reports, tickets, chat, screenshots, or shell
 history.
 
@@ -31,6 +31,29 @@ database/R2 (provider resources).
 | `PG_POOL_MAX`, `PG_CONNECT_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | PostgreSQL pool behavior; API/worker | PostgreSQL deployments | Connection exhaustion, slow failure, or instability | Yes | Recover documented values; keep API at one instance independent of pool size. |
 
 ## Authentication And Cryptography
+
+Client-IP trust on the API affects audit/session metadata, not rate-limit identity.
+Leave trusted proxy CIDRs empty unless the immediate peer and sanitation are
+verified. No new provider configuration is required for account-based limiting;
+never guess Render ingress CIDRs. Customer OTP, platform-admin and registration
+budgets use existing durable auth tables with two-element fixed-window counters.
+Per-user counters and the public-auth overload guard remain process-local.
+Authenticated AI has four active slots per verified user, without a shared
+anonymous gate. Anonymous auto-errors have a separate 30/hour process-local
+quota; authenticated manual support does not consume it. Preserve PostgreSQL and
+the existing single API instance requirement. See api/README.md for exact policy
+and scoped lockout/overload limitations. No hosted settings were changed locally.
+
+Email operations: verify the actual Resend plan and account-wide daily/monthly
+allowance, including staging usage. The registration ceiling is not an email
+budget: rotating recipients can exhaust a 100/day allowance. Before public
+signup, size a separately approved daily new-recipient allowance with customer
+OTP headroom; see api/README.md. No hosted plan or quota was verified locally.
+
+| Variable | Purpose / owner | Default / recovery requirement |
+| --- | --- | --- |
+| `CLIENT_IP_TRUSTED_PROXY_CIDRS` | Nonsecret comma-separated trusted immediate proxy IPs/CIDRs; API | Empty (no proxy trusted). Recover only verified ingress addresses, never generic private ranges. |
+| `CLIENT_IP_PROXY_HEADER` | Nonsecret header selection; API | `x-forwarded-for`, or `cf-connecting-ip` only with verified ingress sanitation. Invalid values prevent startup. |
 
 | Variable | Purpose / owner | Applicability | Loss or wrong value during recovery | Rotatable? | Recovery note |
 | --- | --- | --- | --- | --- | --- |
@@ -105,6 +128,46 @@ Bucket privacy, Standard storage, the bucket-wide `30-day-backup-retention`
 lock, and absence of custom lifecycle deletion are validated provider settings,
 not repository-enforced facts. Reverify them manually. Do not disable the lock
 for recovery.
+
+## Independent PostgreSQL Backups — A2.2 staging tooling
+
+These settings are read by the A2.2 tooling, not by normal API startup. The job
+and independent monitor are **not configured or activated by this repository**.
+Production is rejected. See the [A2.2 recovery/setup procedure](./Peritio_Postgres_Independent_Backups.md)
+for the difference between implemented commands and operator configuration examples.
+Do not copy the API's entire environment or a production credential into the job.
+
+| Variable | Purpose / owner | Applicability | Recovery / rotation requirement |
+| --- | --- | --- | --- |
+| `PERITIO_ENV` | Target gate; backup operator | Job/monitor: `staging`; offline decrypt: `development` | Must match the command; decrypt also refuses hosted Render context. |
+| `PG_BACKUP_RENDER_POSTGRES_ID` | Exact source identity; database owner | Job/monitor | Preserve the complete Render ID, including any lowercase suffix. Checked against instance metadata before new export creation. |
+| `PG_BACKUP_RENDER_OWNER_ID` | Source owner identity; database owner | Job/monitor | Recover the intended workspace/principal ID; never substitute a production source. |
+| `PG_BACKUP_RENDER_DATABASE_NAME` | Exact Render display name; database owner | Export job | Defaults to staging display name `voicepractice_db`; databaseName is separately required to be `voicepractice_db`. |
+| `PG_BACKUP_RENDER_API_KEY` | Export-list/create credential; backup owner | Export job only | Secret. Rotate at Render and update only the dedicated job. Scope availability and effective privileges require provider verification. Not needed for read-only R2 checks. |
+| `PG_BACKUP_DOWNLOAD_HOSTS` | Exact HTTPS download-host allowlist; backup owner | Export download | Hostnames only; never store a signed URL here. Verify privately before changing. |
+| `PG_BACKUP_R2_ACCOUNT_ID`, `PG_BACKUP_R2_ENDPOINT` | Dedicated archive account/endpoint; storage owner | Job/monitor/operator download | Must agree; recover from owner-controlled configuration. Not inherited from media R2 settings. |
+| `PG_BACKUP_R2_BUCKET` | Private independent archive lane; storage owner | Staging tooling | Must be `peritio-postgres-backups-staging`; bucket privacy/lock/lifecycle remain manual controls. |
+| `PG_BACKUP_R2_ACCESS_KEY_ID`, `PG_BACKUP_R2_SECRET_ACCESS_KEY` | Archive access; storage owner | Writer or read-only monitor/operator | Secret. Give the monitor a separate bucket read-only credential. Rotate without exposing values. No media-bucket or production access required. |
+| `PG_BACKUP_PUBLIC_KEY_FILE` | SPKI public encryption key; backup owner | New archive encryption | Public key only; a private-key PEM is rejected. Rotate only after the matching new private key is securely escrowed and recoverable. |
+| `PG_BACKUP_RETENTION_DAYS` | Manifest expiry policy; storage owner | Job | Default 30, allowed 7–90. Must agree with owner-configured physical lifecycle/lock policy; changing this variable does not change R2. |
+| `PG_BACKUP_MAX_AGE_HOURS` | Freshness threshold; backup owner | Monitor/check | Default 36, allowed 25–144. Set 144 for staging schedule `0 9 */5 * *` (up to 120 hours between runs plus 24 hours of grace); use the same value for independent checks. No automatic scheduling or notification delivery is implied. |
+| `PG_BACKUP_MAX_BYTES` | Compressed export cap; backup owner | Job/download/verification | Default 512 MiB, up to 4 GiB. Does not redesign or extend request/job time budgets. |
+| `PG_BACKUP_PRIVATE_KEY_FILE` | Protected recovery-key file; recovery operator | Offline decryption only | Never configure on the scheduled job, commit or disclose it. Recover the matching historical keyId from encrypted escrow, then remove the unencrypted working copy after use. Key loss makes the corresponding archives unrecoverable. |
+| `PG_BACKUP_RESTORE_URL` | Nonconnecting scratch-target guard; recovery operator | Offline decryption only | Restricted to loopback, port 55432 and `peritio_restore_*`. It is not a database connection, authorization, identity or emptiness check (F9 deferred). Do not provide hosted database URLs. |
+
+The private recovery key itself, its encrypted escrow copies and recovery access
+must survive both provider-account loss and job-host loss. Do not leave a generated
+unencrypted `private.pem` on disk after verifying escrow. Rotating the public key
+does not re-encrypt old archives or remove the need for old private keys. Neither
+encryption nor a checksum proves Peritio producer authenticity; the signing/trusted
+provenance decision and transient-retry work are required before production automation.
+
+The example GitHub monitor's `PG_BACKUP_STAGING_POSTGRES_ID` and
+`PG_BACKUP_STAGING_OWNER_ID` repository variables map into the canonical runtime
+ID variables above. Its `PG_BACKUP_STAGING_READ_ACCESS_KEY_ID` and
+`PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY` secrets map into the canonical R2
+credential variables. These are template configuration names, not additional
+application-runtime capabilities or evidence that the workflow is enabled.
 
 ## Training Content Lifecycle And Worker
 

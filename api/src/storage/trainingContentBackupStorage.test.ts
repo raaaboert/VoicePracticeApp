@@ -157,3 +157,27 @@ test("normal cleanup remains isolated from backup storage", async () => {
   assert.doesNotMatch(cleanupScript, /BackupStorage|backupStorage|BACKUP_R2_BUCKET/);
   assert.match(cleanupScript, /createTrainingContentObjectStorage/);
 });
+
+for (const error of [
+  { name: "ObjectLockedByBucketPolicy", $metadata: { httpStatusCode: 409 } },
+  { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } },
+]) {
+  test(`destination conflict ${error.name} requires an existing object`, async () => {
+    let exists = false;
+    const storage = new R2TrainingContentBackupStorage(BACKUP_CONFIG, { client: { async send(command: any) {
+      if (command.constructor.name === "CopyObjectCommand") throw error;
+      if (!exists) throw { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } };
+      return { ContentLength: 42, ContentType: "application/pdf", ETag: '"etag"' };
+    } } });
+    const input = { sourceBucket: "peritio-training-content-staging", sourceKey: "objects/key", destinationKey: "objects/key" };
+    await assert.rejects(storage.copyFromSource(input));
+    exists = true;
+    assert.equal(await storage.copyFromSource(input), "already_present");
+  });
+}
+
+test("unrecognized 409 is not accepted as a backup", async () => {
+  const error = { name: "OperationAborted", $metadata: { httpStatusCode: 409 } };
+  const storage = new R2TrainingContentBackupStorage(BACKUP_CONFIG, { client: { async send() { throw error; } } });
+  await assert.rejects(storage.copyFromSource({ sourceBucket: "live", sourceKey: "objects/key", destinationKey: "objects/key" }));
+});

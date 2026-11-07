@@ -5,7 +5,7 @@ import { Server } from "node:http";
 import { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import test, { after, before } from "node:test";
+import test, { after, before, beforeEach } from "node:test";
 
 import { ApiDatabase, createDefaultConfig, EnterpriseOrg, UserProfile } from "@voicepractice/shared";
 
@@ -24,6 +24,9 @@ let baseUrl: string;
 let server: Server;
 let originalFetch: typeof globalThis.fetch;
 let providerCalls = 0;
+let resetRateLimits: () => void;
+
+beforeEach(() => resetRateLimits());
 
 function buildOrg(): EnterpriseOrg {
   return {
@@ -185,6 +188,9 @@ before(async () => {
   process.env.NODE_ENV = "test";
   process.env.PERITIO_ENV = "development";
   process.env.STORAGE_PROVIDER = "file";
+  // This fixture explicitly models a local proxy supplying separate client addresses.
+  process.env.CLIENT_IP_TRUSTED_PROXY_CIDRS = "127.0.0.1/32";
+  process.env.CLIENT_IP_PROXY_HEADER = "x-forwarded-for";
   process.env.DB_PATH = dbPath;
   process.env.ADMIN_BOOTSTRAP_PASSWORD = "multipart-route-admin-password";
   process.env.ADMIN_TOKEN_SECRET = "admin_token_secret_for_multipart_route";
@@ -200,6 +206,7 @@ before(async () => {
   delete process.env.OPENAI_MAX_DAILY_TOKENS_GLOBAL;
 
   const imported = await import("./index.js");
+  resetRateLimits = imported.clearRateLimitsForTest;
   server = await new Promise<Server>((resolve) => {
     const started = imported.app.listen(0, () => resolve(started));
   });
@@ -272,7 +279,7 @@ test("multipart parser rejects excess parts and oversized nested metadata before
   assert.equal(providerCalls, 1);
 });
 
-test("unauthenticated AI requests share one IP abuse bucket even when userId changes", async () => {
+test("unauthenticated AI requests share a fixed abuse bucket even when userId changes", async () => {
   const attackerIp = "198.51.100.40";
   for (let index = 0; index < 120; index += 1) {
     const denied = await postForm(

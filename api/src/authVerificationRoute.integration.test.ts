@@ -37,6 +37,9 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       ADMIN_BOOTSTRAP_PASSWORD: "auth_test_admin_password",
       ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false", TRAINING_CONTENT_STORAGE_PROVIDER: "disabled" });
     process.env.APP_REVIEW_EMAIL = "reviewer-privacy@auth.test"; process.env.APP_REVIEW_CODE = "808080";
+    // The loopback HTTP fixture models an explicitly trusted proxy, not a direct client.
+    process.env.CLIENT_IP_TRUSTED_PROXY_CIDRS = "127.0.0.1/32";
+    process.env.CLIENT_IP_PROXY_HEADER = "x-forwarded-for";
     const api = await import("./index.js");
     await t.test("missing-schema startup fails before API listen", async () => {
       await assert.rejects(api.startApiServer(), /auth_verification_accounts/);
@@ -48,7 +51,7 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
       const r = await fetch(base + route, { method, headers: {
         "Content-Type": "application/json", "X-Forwarded-For": ip, ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
       }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      return { status: r.status, body: await r.json() as any };
+      return { status: r.status, body: await r.json() as any, retryAfter: r.headers.get("retry-after") };
     };
     let lastCode = "";
     setAuthCodeDeliveryObserverForTest(({ code }) => { lastCode = code; });
@@ -60,6 +63,49 @@ test("PostgreSQL dashboard/mobile authentication HTTP contracts and durable abus
     const login = await request("/auth/login", { password: "auth_test_admin_password" });
     assert.equal(login.status, 200); const admin = login.body.token as string;
     const patch = (route: string, body: unknown) => request(route, body, admin, "198.51.100.1", "PATCH");
+
+    const serverBudgetKey = (scope: string) => crypto.createHmac("sha256", process.env.WEB_AUTH_TOKEN_SECRET!)
+      .update(JSON.stringify(["peritio.auth.abuse.v1", scope, 0])).digest("hex");
+    await t.test("PostgreSQL HTTP admin attempts 10/11/12 succeed normally and 13 returns 429, then expires", async () => {
+      await db.pool.query("DELETE FROM auth_verification_accounts WHERE account_key=$1", [serverBudgetKey("platform-admin-login")]);
+      for (let attempt = 1; attempt <= 11; attempt++) {
+        const denied = await request("/auth/login", { password: "incorrect" }, undefined, `192.0.2.${attempt}`);
+        assert.equal(denied.status, 401, `admin attempt ${attempt}`);
+      }
+      assert.equal((await request("/auth/login", { password: "auth_test_admin_password" })).status, 200, "correct password accepted on attempt 12");
+      const limited = await request("/auth/login", { password: "auth_test_admin_password" });
+      assert.equal(limited.status, 429); assert.ok(Number(limited.retryAfter) > 0 && Number(limited.retryAfter) <= 900);
+      api.advanceAuthVerificationClockForTest(900_001);
+      assert.equal((await request("/auth/login", { password: "auth_test_admin_password" })).status, 200);
+    });
+    await t.test("registration 300 is atomic; concurrent rejects and existing-user admission never rewrite app_state", async () => {
+      await db.pool.query("INSERT INTO auth_verification_accounts(account_key,failure_times) VALUES ($1,$2::jsonb)",
+        [serverBudgetKey("new-registration"), JSON.stringify([Date.now() + 900_001, 299])]);
+      await db.pool.query(`CREATE TABLE registration_writes(n integer);
+        CREATE FUNCTION count_registration_writes() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO registration_writes VALUES(1); RETURN NEW; END $$;
+        CREATE TRIGGER count_registration_writes BEFORE UPDATE ON app_state FOR EACH ROW EXECUTE FUNCTION count_registration_writes()`);
+      const body = (i: number) => ({ email: `admission-${i}@auth.test`, firstName: "New", lastName: "User", timezone: "UTC" });
+      try {
+        const admitted = await Promise.all(Array.from({ length: 8 }, (_, i) => request("/mobile/onboard", body(i), undefined, `192.0.2.${i + 1}`)));
+        assert.equal(admitted.filter(r => r.status === 201).length, 1);
+        assert.equal(admitted.filter(r => r.status === 429).length, 7);
+        assert.ok(admitted.filter(r => r.status === 429).every(r => Number(r.retryAfter) > 0));
+        assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM registration_writes")).rows[0].n, 1, "only the accepted registration publishes app_state");
+        const before = await appState();
+        api.setDatabaseSaveBarrierForTest(async () => { throw new Error("rejected registration attempted app_state publication"); });
+        try {
+          const denied = await request("/mobile/onboard", body(99)); assert.equal(denied.status, 429);
+          assert.ok(Number(denied.retryAfter) > 0);
+          assert.equal((await request("/mobile/onboard", { ...body(100), email: users[2].email })).status, 200,
+            "exhausted new-registration budget does not block existing accounts");
+        } finally { api.setDatabaseSaveBarrierForTest(null); }
+        assert.equal((await appState()).updated_at.getTime(), before.updated_at.getTime());
+        assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM registration_writes")).rows[0].n, 1);
+        const persisted = (await db.pool.query("SELECT failure_times FROM auth_verification_accounts WHERE account_key=$1", [serverBudgetKey("new-registration")])).rows[0].failure_times;
+        assert.equal(persisted[1], 300);
+      } finally { await db.pool.query("DROP TRIGGER count_registration_writes ON app_state; DROP FUNCTION count_registration_writes(); DROP TABLE registration_writes"); }
+      api.clearRateLimitsForTest();
+    });
 
     await t.test("ten guesses without a challenge cannot lock a known account or disclose existence", async () => {
       let failure: unknown;

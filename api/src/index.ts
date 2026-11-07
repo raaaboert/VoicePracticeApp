@@ -1,5 +1,7 @@
 import "express-async-errors";
 import { listTopicScenarioManagement, topicScenarioOptions } from "./services/focusTopicScenarioManagement.js";
+import { createClientIpResolver } from "./services/clientIp.js";
+import { AnonymousAbuseGuard } from "./services/anonymousAbuseGuard.js";
 import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import crypto from "node:crypto";
@@ -628,6 +630,16 @@ import {
   doesRecognizedSimulationSessionMatchContext,
   resolvePreferredSimulationDivisionId,
 } from "./services/simulationDivisionAnchoring.js";
+
+import {
+  fingerprintOrganizationCreationInput,
+  organizationIdForCreationOperation,
+  OrganizationCreationRetryError,
+  recordOrganizationCreation,
+  requireOrganizationCreationOperationId,
+  resolveOrganizationCreationReplay,
+  restoreOrganizationCreationReceipts,
+} from "./services/organizationCreationRetry.js";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -3528,70 +3540,28 @@ interface RateLimiterOptions {
 
 const rateLimitByKey = new Map<string, RateLimitState>();
 let rateLimitCleanupCounter = 0;
+let anonymousBudgetEpochForTest = 0;
 
-function getClientIp(request: Request): string {
-  const normalizeIp = (value: string | null | undefined): string | null => {
-    if (!value) {
-      return null;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-    if (trimmed.startsWith("::ffff:")) {
-      return trimmed.slice(7);
-    }
-    if (trimmed === "::1") {
-      return "127.0.0.1";
-    }
-    return trimmed;
-  };
-
-  const isPrivateOrLoopbackIp = (ip: string): boolean => {
-    const lower = ip.toLowerCase();
-    if (
-      lower === "127.0.0.1" ||
-      lower === "localhost" ||
-      lower.startsWith("10.") ||
-      lower.startsWith("192.168.") ||
-      lower.startsWith("169.254.") ||
-      lower.startsWith("fc") ||
-      lower.startsWith("fd") ||
-      lower.startsWith("fe80:")
-    ) {
-      return true;
-    }
-
-    if (lower.startsWith("172.")) {
-      const secondOctet = Number(lower.split(".")[1]);
-      return Number.isFinite(secondOctet) && secondOctet >= 16 && secondOctet <= 31;
-    }
-
-    return false;
-  };
-
-  const remoteAddress = normalizeIp(request.socket.remoteAddress);
-  const canTrustForwarded = remoteAddress ? isPrivateOrLoopbackIp(remoteAddress) : false;
-
-  if (canTrustForwarded) {
-    const forwarded = request.headers["x-forwarded-for"];
-    const firstForwarded = (() => {
-      if (typeof forwarded === "string" && forwarded.trim()) {
-        return forwarded.split(",")[0] ?? null;
-      }
-      if (Array.isArray(forwarded) && forwarded.length > 0) {
-        return forwarded[0] ?? null;
-      }
-      return null;
-    })();
-    const forwardedIp = normalizeIp(firstForwarded);
-    if (forwardedIp) {
-      return forwardedIp;
-    }
-  }
-
-  return remoteAddress || "unknown";
+function rejectRateLimit(response: Response, seconds: number): void {
+  response.setHeader("Retry-After", String(seconds));
+  response.status(429).json({ error: "Too many requests. Please wait and retry." });
 }
+
+function anonymousOverloadGuard(guard = new AnonymousAbuseGuard()) {
+  return (_request: Request, response: Response, next: NextFunction): void => {
+    const release = guard.acquire();
+    if (!release) { rejectRateLimit(response, 1); return; }
+    response.once("finish", release); response.once("close", release);
+    if (response.destroyed) { release(); return; }
+    next();
+  };
+}
+
+const getClientIp = createClientIpResolver(process.env, () => logWarnThrottled(
+  "client-ip:untrusted-forwarded",
+  "[client-ip] Ignoring forwarded client-IP headers from an untrusted connection peer; verify ingress configuration for accurate audit metadata.",
+  5 * 60 * 1000,
+));
 
 function cleanupRateLimitStore(nowMs: number): void {
   rateLimitCleanupCounter += 1;
@@ -3618,7 +3588,8 @@ function consumeRateLimit(
   const nowMs = Date.now();
   cleanupRateLimitStore(nowMs);
 
-  const selectorValue = selectorOverride || options.keySelector?.(request) || getClientIp(request);
+  const selectorValue = selectorOverride || options.keySelector?.(request);
+  if (!selectorValue) throw new Error("Rate limiter requires a server-owned or verified identity.");
   const key = `${options.name}:${selectorValue || "unknown"}`;
   const existing = rateLimitByKey.get(key);
   const state =
@@ -3643,39 +3614,6 @@ function consumeRateLimit(
   }
 
   return true;
-}
-
-function rejectIfRateLimitAlreadyExhausted(
-  options: RateLimiterOptions,
-  request: Request,
-  response: Response
-): boolean {
-  const windowMs = Math.max(1_000, Math.floor(options.windowMs));
-  const max = Math.max(1, Math.floor(options.max));
-  const nowMs = Date.now();
-  cleanupRateLimitStore(nowMs);
-
-  const selectorValue = options.keySelector?.(request) || getClientIp(request);
-  const state = rateLimitByKey.get(`${options.name}:${selectorValue || "unknown"}`);
-  if (!state || nowMs - state.windowStartMs >= windowMs || state.count < max) {
-    return false;
-  }
-
-  const retryAfterSeconds = Math.max(1, Math.ceil((state.windowStartMs + windowMs - nowMs) / 1000));
-  options.onLimitExceeded?.(request, retryAfterSeconds);
-  response.setHeader("Retry-After", String(retryAfterSeconds));
-  response.status(429).json({
-    error: "Too many requests. Please wait and retry."
-  });
-  return true;
-}
-
-function createRateLimiter(options: RateLimiterOptions) {
-  return (request: Request, response: Response, next: NextFunction): void => {
-    if (consumeRateLimit(options, request, response)) {
-      next();
-    }
-  };
 }
 
 function isValidTimeZone(timeZone: string): boolean {
@@ -4780,6 +4718,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
     normalized.supportCases = legacySupportCases;
   }
 
+  restoreOrganizationCreationReceipts(normalized, raw);
   purgeDemoSeedData(normalized);
   purgeExpiredSupportTranscripts(normalized, now);
   expireOrgJoinRequests(normalized, new Date(now));
@@ -4789,6 +4728,7 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 let databaseStorage: DatabaseStorage | null = null;
 let databaseCache: ApiDatabase | null = null;
 let databaseOperationQueue: Promise<void> = Promise.resolve();
+let databaseOperationObserverForTest: ((phase: "queued" | "acquired" | "released") => void) | null = null;
 let isDatabaseReady = false;
 let databaseReadyCheckedAt: string | null = null;
 let databaseReadyError: string | null = null;
@@ -4890,6 +4830,7 @@ async function migrateUserProfileAppStateNormalization(): Promise<void> {
 }
 
 async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
+  databaseOperationObserverForTest?.("queued");
   let releaseLock: () => void = () => {};
   const waitForTurn = databaseOperationQueue;
   databaseOperationQueue = new Promise<void>((resolve) => {
@@ -4898,9 +4839,11 @@ async function withDatabaseLock<T>(runner: () => Promise<T>): Promise<T> {
 
   await waitForTurn;
   try {
+    databaseOperationObserverForTest?.("acquired");
     return await runner();
   } finally {
     releaseLock();
+    databaseOperationObserverForTest?.("released");
   }
 }
 
@@ -5293,7 +5236,7 @@ async function refreshDatabaseReadiness(): Promise<void> {
         trainingContentAssetStore
       },
       loadDatabase: async () => {
-        await loadDatabase({ forceStorageRead: true });
+        await withDatabaseLock(() => loadDatabase({ forceStorageRead: true }));
       },
       migrateUserProfileAppStateNormalization
     });
@@ -5757,15 +5700,6 @@ function logDashboardWebAuthRequestIgnored(email: string, reason: string): void 
   logWarnThrottled(
     `web-auth-request:${reason}:${normalizedEmail}`,
     `[web-auth][request-code] ignored request for ${normalizedEmail}: ${reason}`,
-    60 * 1000
-  );
-}
-
-function logDashboardWebAuthRequestRateLimited(request: Request, retryAfterSeconds: number): void {
-  const clientIp = getClientIp(request) || "unknown";
-  logWarnThrottled(
-    `web-auth-request:rate-limited:${clientIp}`,
-    `[web-auth][request-code] rate limited client ${clientIp}; retry_after_seconds=${retryAfterSeconds}`,
     60 * 1000
   );
 }
@@ -13084,9 +13018,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     // A 15s compressed audio clip should be well under this; keeps memory bounded.
-    // Busboy reports LIMIT_FILE_SIZE when bytes reach the configured value, so
-    // use max + 1 to retain an inclusive 12 MB application-level boundary.
-    fileSize: (12 * 1024 * 1024) + 1,
+    // Multer 2.5 treats fileSize as the inclusive maximum allowed size.
+    fileSize: 12 * 1024 * 1024,
     files: 1,
     fields: 4,
     parts: 5,
@@ -13097,16 +13030,13 @@ const upload = multer({
 });
 
 const authenticatedMobileAiUserIds = new WeakMap<Request, string>();
+const activeMobileAiByUser = new Map<string, number>();
 
 async function requireMobileAiAuthentication(
   request: Request,
   response: Response,
   next: NextFunction
 ): Promise<void> {
-  if (rejectIfRateLimitAlreadyExhausted(unauthenticatedAiRateLimitOptions, request, response)) {
-    return;
-  }
-
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     if (!consumeRateLimit(unauthenticatedAiRateLimitOptions, request, response)) {
@@ -13141,50 +13071,23 @@ async function requireMobileAiAuthentication(
   next();
 }
 
-const authLoginRateLimiter = createRateLimiter({
-  name: "auth-login",
-  windowMs: 15 * 60 * 1000,
-  max: 12
-});
-
-const webAuthRequestCodeRateLimiter = createRateLimiter({
-  name: "web-auth-request-code",
-  windowMs: 15 * 60 * 1000,
-  max: 12,
-  onLimitExceeded: logDashboardWebAuthRequestRateLimited
-});
-
-const webAuthVerifyCodeRateLimiter = createRateLimiter({
-  name: "web-auth-verify-code",
-  windowMs: 15 * 60 * 1000,
-  max: 20
-});
-
-const mobileOnboardRateLimiter = createRateLimiter({
-  name: "mobile-onboard",
-  windowMs: 15 * 60 * 1000,
-  max: 30
-});
-
-const mobileOnboardAccountRateLimiter = createRateLimiter({
-  name: "mobile-onboard-account",
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  keySelector: (request) => {
-    const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "unknown";
-    return crypto.createHash("sha256").update(email || "unknown").digest("hex");
-  }
-});
-
-const mobileVerificationRateLimiter = createRateLimiter({
+const publicAuthAdmission = new AnonymousAbuseGuard();
+const publicAuthOverloadGuard = anonymousOverloadGuard(publicAuthAdmission);
+const authLoginRateLimiter = [publicAuthOverloadGuard, async (_request: Request, response: Response, next: NextFunction) => {
+  const retry = await authVerificationStore.reserveAnonymousOperation("platform-admin-login", anonymousBudgetEpochForTest);
+  if (retry) { rejectRateLimit(response, retry); return; }
+  next();
+}];
+// Durable OTP account/challenge limits enforce issuance and verification limits.
+const webAuthRequestCodeRateLimiter = publicAuthOverloadGuard;
+const webAuthVerifyCodeRateLimiter = publicAuthOverloadGuard;
+const mobileOnboardRateLimiter = publicAuthOverloadGuard;
+const mobileVerificationRateLimiter = publicAuthOverloadGuard;
+const mobileVerificationAccountRateLimitOptions: RateLimiterOptions = {
   name: "mobile-verify-email",
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  keySelector: (request) => {
-    const bodyUserId = ((request.body as { userId?: unknown } | undefined)?.userId ?? "").toString().trim();
-    return `${getClientIp(request)}:${bodyUserId || "unknown"}`;
-  }
-});
+  max: 20
+};
 
 const mobileReviewerVerificationRateLimitOptions: RateLimiterOptions = {
   name: "mobile-reviewer-verify-email",
@@ -13192,24 +13095,22 @@ const mobileReviewerVerificationRateLimitOptions: RateLimiterOptions = {
   max: 20,
 };
 
-const mobileOrgJoinRequestRateLimiter = createRateLimiter({
+const mobileOrgJoinRequestRateLimitOptions: RateLimiterOptions = {
   name: "mobile-org-join-request",
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  keySelector: (request) => `${getClientIp(request)}:${request.params.userId || "unknown"}`
-});
+  max: 20
+};
 
-const mobilePublicErrorReportRateLimiter = createRateLimiter({
-  name: "mobile-public-error-report",
-  windowMs: 60 * 60 * 1000,
-  max: 30
-});
+const mobilePublicErrorReportRateLimiter = (request: Request, response: Response, next: NextFunction) => {
+  if (consumeRateLimit({ name: "anonymous-support-report", windowMs: 60 * 60_000, max: 30,
+    keySelector: () => "anonymous-global" }, request, response)) next();
+};
 
 const unauthenticatedAiRateLimitOptions: RateLimiterOptions = {
   name: "mobile-ai-unauthenticated",
   windowMs: 15 * 60 * 1000,
   max: 120,
-  keySelector: (request) => getClientIp(request)
+  keySelector: () => "anonymous-global"
 };
 
 const authenticatedAiRateLimitOptions: RateLimiterOptions = {
@@ -13226,15 +13127,33 @@ const aiRouteRateLimiter = (request: Request, response: Response, next: NextFunc
   }
 
   if (consumeRateLimit(authenticatedAiRateLimitOptions, request, response, authenticatedUserId)) {
+    const active = activeMobileAiByUser.get(authenticatedUserId) ?? 0;
+    if (active >= 4) { rejectRateLimit(response, 1); return; }
+    activeMobileAiByUser.set(authenticatedUserId, active + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const remaining = (activeMobileAiByUser.get(authenticatedUserId) ?? 1) - 1;
+      if (remaining > 0) activeMobileAiByUser.set(authenticatedUserId, remaining);
+      else activeMobileAiByUser.delete(authenticatedUserId);
+    };
+    response.once("finish", release); response.once("close", release);
+    if (response.destroyed) { release(); return; }
     next();
   }
 };
 
-const trainingContentStorageRateLimiter = createRateLimiter({
+const trainingContentStorageRateLimitOptions: RateLimiterOptions = {
   name: "training-content-storage",
   windowMs: 15 * 60 * 1000,
   max: 120
-});
+};
+const trainingContentStorageRateLimiter = (request: ContentOrganizationAuthRequest, response: Response, next: NextFunction) => {
+  const subject = request.dashboard?.user.id ?? (request.admin ? "platform-admin" : null);
+  if (!subject) { response.status(401).json({ error: "Invalid or missing authentication token." }); return; }
+  if (consumeRateLimit(trainingContentStorageRateLimitOptions, request, response, subject)) next();
+};
 
 function isRemoteAiConfigured(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
@@ -14527,8 +14446,8 @@ for (const action of ["publish", "unpublish", "archive"] as const) {
 
 app.post(
   "/dashboard/admin/training-content/:contentId/assets/uploads",
-  trainingContentStorageRateLimiter,
   requireDashboardAuth,
+  trainingContentStorageRateLimiter,
   async (request: DashboardAuthRequest, response: Response) => {
     if (rejectTrainingContentClientOwnedFields(request.body, response)) {
       return;
@@ -14563,8 +14482,8 @@ app.post(
 
 app.post(
   "/dashboard/admin/training-content/:contentId/assets/:assetId/finalize",
-  trainingContentStorageRateLimiter,
   requireDashboardAuth,
+  trainingContentStorageRateLimiter,
   async (request: DashboardAuthRequest, response: Response) => {
     if (rejectTrainingContentClientOwnedFields(request.body, response)) {
       return;
@@ -14588,8 +14507,8 @@ app.post(
 
 app.get(
   "/dashboard/admin/training-content/:contentId/assets/:assetId",
-  trainingContentStorageRateLimiter,
   requireDashboardAuth,
+  trainingContentStorageRateLimiter,
   async (request: DashboardAuthRequest, response: Response) => {
     const context = await resolveTrainingContentManagementContext(request, response);
     if (!context) {
@@ -14609,8 +14528,8 @@ app.get(
 
 app.post(
   "/dashboard/admin/training-content/:contentId/assets/:assetId/access",
-  trainingContentStorageRateLimiter,
   requireDashboardAuth,
+  trainingContentStorageRateLimiter,
   async (request: DashboardAuthRequest, response: Response) => {
     if (rejectTrainingContentClientOwnedFields(request.body, response)) {
       return;
@@ -16613,6 +16532,18 @@ app.patch("/orgs/:orgId/modules/training-content", requireAdmin, async (request:
 });
 
 app.post("/orgs", requireAdmin, async (request: Request, response: Response) => {
+  let operationId: string;
+  try {
+    operationId = requireOrganizationCreationOperationId(request.get("Idempotency-Key"));
+  } catch (error) {
+    if (!(error instanceof OrganizationCreationRetryError)) throw error;
+    response.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+    response.status(400).json({ error: "Organization details must be an object." });
+    return;
+  }
   const body = request.body as {
     name?: string;
     contactName?: string;
@@ -16627,7 +16558,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     softLimitPercentTriggers?: number[];
     maxSimulationMinutes?: number;
   };
-  const name = body.name?.trim();
+  const fingerprint = fingerprintOrganizationCreationInput(body);
+  const name = typeof body.name === "string" ? body.name.trim() : "";
 
   if (!name) {
     response.status(400).json({ error: "Organization name is required." });
@@ -16635,6 +16567,8 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
   }
 
   const createdOrg = await withDatabase(async (db) => {
+    const replay = resolveOrganizationCreationReplay(db, operationId, fingerprint);
+    if (replay) return replay;
     const allowedIndustryIds = new Set(getConfiguredIndustryIds(db.config));
     const fallbackIndustryIds = getConfiguredActiveIndustryIds(db.config);
     if (body.activeIndustries !== undefined
@@ -16662,7 +16596,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     );
     const monthlyMinutesFallback = Math.floor((dailySecondsQuota * 30) / 60);
     const org: EnterpriseOrg = {
-      id: `org_${uuid()}`,
+      id: organizationIdForCreationOperation(operationId),
       name,
       status: "active",
       contactName: normalizeContactName(body.contactName),
@@ -16687,6 +16621,7 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
     };
 
     db.orgs.push(org);
+    recordOrganizationCreation(db, operationId, fingerprint, org);
     appendPlatformAuditEvent(db, {
       action: "org.created",
       orgId: org.id,
@@ -16698,6 +16633,10 @@ app.post("/orgs", requireAdmin, async (request: Request, response: Response) => 
       }
     });
     return org;
+  }).catch((error: unknown) => {
+    if (!(error instanceof OrganizationCreationRetryError)) throw error;
+    response.status(error.status).json({ error: error.message, code: error.code });
+    return null;
   });
   if (!createdOrg) return;
   organizationConfigurationResponseObserverForTest?.("POST /orgs", 201);
@@ -19665,8 +19604,8 @@ for (const action of ["publish", "unpublish"] as const) {
 
 app.post(
   "/orgs/:orgId/trainings/:trainingId/content/:contentId/assets/uploads",
-  trainingContentStorageRateLimiter,
   requireContentOrganizationAuth,
+  trainingContentStorageRateLimiter,
   async (request: ContentOrganizationAuthRequest, response: Response) => {
     if (rejectTrainingContentClientOwnedFields(request.body, response)) return;
     if (rejectUnexpectedTopicContentFields(request.body, [
@@ -19700,8 +19639,8 @@ app.post(
 
 app.post(
   "/orgs/:orgId/trainings/:trainingId/content/:contentId/assets/:assetId/finalize",
-  trainingContentStorageRateLimiter,
   requireContentOrganizationAuth,
+  trainingContentStorageRateLimiter,
   async (request: ContentOrganizationAuthRequest, response: Response) => {
     const resources = await resolveTopicScopedContentRouteResources(
       request, response, request.params.contentId,
@@ -21439,7 +21378,6 @@ app.delete("/users/:userId", requireAdmin, async (request: Request, response: Re
 app.post(
   "/mobile/onboard",
   mobileOnboardRateLimiter,
-  mobileOnboardAccountRateLimiter,
   async (request: Request, response: Response) => {
   const body = request.body as MobileOnboardRequest;
   const email = body.email?.trim().toLowerCase();
@@ -21461,6 +21399,7 @@ app.post(
   }
   const timezone = resolveTimeZone(body.timezone);
 
+  let registrationReserved = false;
   const prepared = await withReadFirstAuthenticationWrite(async (db, mayWrite) => {
     const requestedOrg = joinCode ? findActiveOrgByJoinCode(db, joinCode) : null;
     if (joinCode && !requestedOrg) {
@@ -21490,7 +21429,16 @@ app.post(
       return { status: 200, pendingUserId: existing.id, pendingToken: null };
     }
 
-    if (!mayWrite) return AUTHENTICATION_WRITE_REQUIRED;
+    if (!mayWrite) {
+      const retry = await authVerificationStore.reserveAnonymousOperation("new-registration", anonymousBudgetEpochForTest);
+      if (retry) {
+        response.setHeader("Retry-After", String(retry));
+        return { status: 429, body: { error: "Too many requests. Please wait and retry." } };
+      }
+      registrationReserved = true;
+      return AUTHENTICATION_WRITE_REQUIRED;
+    }
+    if (!registrationReserved) throw new Error("Registration requires durable admission before app-state mutation.");
     const now = nowIso();
     const user: UserProfile = {
       id: `usr_${uuid()}`,
@@ -21604,6 +21552,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       return { status: 403, body: { error: "This account has been deactivated." } };
     }
 
+    if (!consumeRateLimit(mobileVerificationAccountRateLimitOptions, request, response, user.id)) return null;
     if (!onboardingToken && user.emailVerifiedAt && user.mobileProfileReonboardingRequired !== true) {
       return { status: 409, body: { error: "Email already verified." } };
     }
@@ -21626,6 +21575,7 @@ app.post("/mobile/onboard/resend-verification", mobileVerificationRateLimiter, a
       },
     };
   })();
+  if (!outcome) return;
   authenticationResponseObserverForTest?.("POST /mobile/onboard/resend-verification", outcome.status);
   response.status(outcome.status).json(outcome.body);
 });
@@ -21658,14 +21608,6 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return { status: 404, body: { error: "User not found." } };
     }
 
-    if (
-      !mayWrite && APP_REVIEW_CREDENTIAL
-      && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
-      && !consumeRateLimit(mobileReviewerVerificationRateLimitOptions, request, response, user.id)
-    ) {
-      return null;
-    }
-
     const now = new Date();
     const onboardingToken = isExistingMobileOnboardingTokenForUser(authToken, user, now);
     if (!onboardingToken && !hasValidMobileTokenForUser(db, user.id, authToken, {
@@ -21675,6 +21617,11 @@ app.post("/mobile/onboard/verify-email", mobileVerificationRateLimiter, async (r
       return { status: 401, body: { error: "Invalid mobile token." } };
     }
 
+    if (!mayWrite) {
+      const limits = APP_REVIEW_CREDENTIAL && normalizeEmailForExactMatch(user.email) === APP_REVIEW_CREDENTIAL.email
+        ? mobileReviewerVerificationRateLimitOptions : mobileVerificationAccountRateLimitOptions;
+      if (!consumeRateLimit(limits, request, response, user.id)) return null;
+    }
     if (!canVerifyCurrentIdentity(db, user, false)) return { status: 403, body: { error: "Verification is unavailable for this account." } };
 
     const needsCodeVerification = Boolean(onboardingToken) || !user.emailVerifiedAt || user.mobileProfileReonboardingRequired === true;
@@ -22349,15 +22296,15 @@ app.get(
 
 app.post(
   "/mobile/users/:userId/training-content/:contentId/asset-access",
-  trainingContentStorageRateLimiter,
   async (request: Request, response: Response) => {
     try {
-      const result = await withMobileTrainingContentContext(request, response, (context) =>
-        trainingContentMobileService.createAssetAccess(
+      const result = await withMobileTrainingContentContext(request, response, async (context) => {
+        if (!consumeRateLimit(trainingContentStorageRateLimitOptions, request, response, context.user.id)) return null;
+        return trainingContentMobileService.createAssetAccess(
           context,
           request.params.contentId
-        )
-      );
+        );
+      });
       if (result) {
         response.json(result);
       }
@@ -22465,7 +22412,7 @@ app.get("/mobile/users/:userId/org-access-requests", async (request: Request, re
   });
 });
 
-app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLimiter, async (request: Request, response: Response) => {
+app.post("/mobile/users/:userId/org-access-requests", async (request: Request, response: Response) => {
   const authToken = getIncomingMobileToken(request);
   if (!authToken) {
     response.status(401).json({ error: "Missing mobile token." });
@@ -22490,6 +22437,8 @@ app.post("/mobile/users/:userId/org-access-requests", mobileOrgJoinRequestRateLi
       response.status(401).json({ error: "Invalid mobile token." });
       return;
     }
+
+    if (!consumeRateLimit(mobileOrgJoinRequestRateLimitOptions, request, response, user.id)) return;
 
     if (user.status !== "active") {
       response.status(403).json({ error: "Your account is deactivated. Contact your organization admin." });
@@ -28570,17 +28519,24 @@ function isJsonBodyParseError(error: unknown): boolean {
     status?: unknown;
     statusCode?: unknown;
     type?: unknown;
+    code?: unknown;
   };
   const status = candidate.status ?? candidate.statusCode;
-  return candidate.type === "entity.parse.failed" && status === 400;
+  return status === 400 && (candidate.type === "entity.parse.failed"
+    || candidate.code === "Z_DATA_ERROR" || candidate.code === "Z_BUF_ERROR");
 }
 
 app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
-  if (error instanceof multer.MulterError) {
+  if (error instanceof multer.MulterError || (error instanceof Error && error.message === "Unexpected end of form")) {
     response.status(400).json({
       error: "Multipart upload is invalid or exceeds the allowed limits.",
-      code: error.code
+      code: error instanceof multer.MulterError ? error.code : "INVALID_MULTIPART"
     });
+    return;
+  }
+
+  if (error && typeof error === "object" && "type" in error && error.type === "entity.too.large") {
+    response.status(413).json({ error: "Request body exceeds the allowed size." });
     return;
   }
 
@@ -28700,6 +28656,16 @@ export async function refreshDatabaseReadinessForTest(): Promise<void> {
     throw new Error("refreshDatabaseReadinessForTest is only available in test.");
   }
   await refreshDatabaseReadiness();
+}
+
+export function setDatabaseReadinessHarnessForTest(
+  storage: DatabaseStorage,
+  observer: ((phase: "queued" | "acquired" | "released") => void) | null,
+): void {
+  if (runtimeConfig.nodeEnv !== "test") throw new Error("Database readiness harness is only available in test.");
+  databaseStorage = storage;
+  databaseCache = null;
+  databaseOperationObserverForTest = observer;
 }
 
 export function getMobileUpdateWaiterCountForTest(userId: string): number {
@@ -28861,6 +28827,8 @@ export function clearRateLimitsForTest(): void {
     throw new Error("clearRateLimitsForTest is only available in test.");
   }
   rateLimitByKey.clear();
+  publicAuthAdmission.resetForTest();
+  anonymousBudgetEpochForTest++;
   rateLimitCleanupCounter = 0;
 }
 

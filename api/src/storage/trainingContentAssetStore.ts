@@ -219,7 +219,7 @@ export interface TrainingContentAssetStore {
   }): Promise<{ asset: TrainingContentAssetRecord; replacedAsset: TrainingContentAssetRecord | null }>;
   markAssetBackedUp(assetId: string, backedUpAt: Date): Promise<TrainingContentAssetRecord>;
   recordBackupFailure(assetId: string, now?: Date): Promise<TrainingContentAssetRecord>;
-  listAssetsPendingBackup(limit: number): Promise<TrainingContentAssetRecord[]>;
+  listAssetsPendingBackup(limit: number, verification?: { afterId: string | null }): Promise<TrainingContentAssetRecord[]>;
   countAssetsPendingBackup(): Promise<number>;
   clearTemporaryObject(params: {
     orgId: string;
@@ -254,6 +254,8 @@ interface TrainingContentAssetStoreParams {
   pgConnectTimeoutMs: number;
   pgIdleTimeoutMs: number;
   queryPool?: AssetQueryPool;
+  // Operator tooling checks the existing schema; it must never run startup migrations.
+  schemaInitialization?: "migrate" | "existing";
 }
 
 type AssetQueryPool = Pick<Pool, "query" | "connect">;
@@ -468,7 +470,8 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
   constructor(
     databaseUrl: string,
     options: { pgPoolMax: number; pgConnectTimeoutMs: number; pgIdleTimeoutMs: number },
-    queryPool?: AssetQueryPool
+    queryPool?: AssetQueryPool,
+    private readonly schemaInitialization: "migrate" | "existing" = "migrate"
   ) {
     this.pool = queryPool ?? new Pool({
       connectionString: databaseUrl,
@@ -481,7 +484,9 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
 
   async initialize(): Promise<void> {
     if (!this.initialization) {
-      this.initialization = initializeTrainingContentSchema(this.pool);
+      this.initialization = this.schemaInitialization === "existing"
+        ? this.pool.query(`SELECT ${ASSET_COLUMNS} FROM org_content_assets LIMIT 0`).then(() => undefined)
+        : initializeTrainingContentSchema(this.pool);
     }
     await this.initialization;
   }
@@ -1446,7 +1451,8 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
         SET backed_up_at = COALESCE(backed_up_at, $2),
             updated_at = CASE WHEN backed_up_at IS NULL THEN $2 ELSE updated_at END
         WHERE id = $1
-          AND upload_state = 'ready'
+          AND upload_state IN ('ready', 'superseded')
+          AND object_deleted_at IS NULL
           AND final_object_key IS NOT NULL
         RETURNING ${ASSET_COLUMNS}
       `,
@@ -1454,7 +1460,7 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     );
     if (!result.rows[0]) {
       throw new TrainingContentAssetStoreError(
-        "Only ready Training Content assets can be marked as backed up.",
+        "Only retained finalized Training Content assets can be marked as backed up.",
         "asset_state_conflict"
       );
     }
@@ -1472,8 +1478,8 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
         SET backup_attempt_count = backup_attempt_count + 1,
             updated_at = $2
         WHERE id = $1
-          AND upload_state = 'ready'
-          AND backed_up_at IS NULL
+          AND upload_state IN ('ready', 'superseded')
+          AND object_deleted_at IS NULL
           AND final_object_key IS NOT NULL
         RETURNING ${ASSET_COLUMNS}
       `,
@@ -1481,27 +1487,31 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
     );
     if (!result.rows[0]) {
       throw new TrainingContentAssetStoreError(
-        "Only ready unbacked Training Content assets can record a backup failure.",
+        "Only retained finalized Training Content assets can record a backup failure.",
         "asset_state_conflict"
       );
     }
     return mapAssetRow(result.rows[0]);
   }
 
-  async listAssetsPendingBackup(limit: number): Promise<TrainingContentAssetRecord[]> {
+  async listAssetsPendingBackup(
+    limit: number, verification?: { afterId: string | null }
+  ): Promise<TrainingContentAssetRecord[]> {
     await this.initialize();
     const boundedLimit = Math.max(1, Math.min(1000, requirePositiveInteger(limit, "Backup limit")));
     const result = await this.pool.query<AssetRow>(
       `
         SELECT ${ASSET_COLUMNS}
         FROM org_content_assets
-        WHERE upload_state = 'ready'
-          AND backed_up_at IS NULL
+        WHERE upload_state IN ('ready', 'superseded')
+          AND object_deleted_at IS NULL
+          AND ($2::boolean OR backed_up_at IS NULL)
           AND final_object_key IS NOT NULL
-        ORDER BY updated_at ASC, id ASC
+          ${verification ? "AND ($3::uuid IS NULL OR id > $3::uuid)" : ""}
+        ORDER BY ${verification ? "id ASC" : "updated_at ASC, id ASC"}
         LIMIT $1
       `,
-      [boundedLimit]
+      verification ? [boundedLimit, true, verification.afterId] : [boundedLimit, false]
     );
     return result.rows.map(mapAssetRow);
   }
@@ -1512,7 +1522,8 @@ class PostgresTrainingContentAssetStore implements TrainingContentAssetStore {
       `
         SELECT COUNT(*) AS pending_count
         FROM org_content_assets
-        WHERE upload_state = 'ready'
+        WHERE upload_state IN ('ready', 'superseded')
+          AND object_deleted_at IS NULL
           AND backed_up_at IS NULL
           AND final_object_key IS NOT NULL
       `
@@ -2130,6 +2141,7 @@ export function createTrainingContentAssetStore(
       pgConnectTimeoutMs: params.pgConnectTimeoutMs,
       pgIdleTimeoutMs: params.pgIdleTimeoutMs,
     },
-    params.queryPool
+    params.queryPool,
+    params.schemaInitialization
   );
 }

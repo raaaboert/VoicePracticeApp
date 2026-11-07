@@ -233,6 +233,9 @@ before(async () => {
   process.env.NODE_ENV = "test";
   process.env.PERITIO_ENV = "development";
   process.env.STORAGE_PROVIDER = "file";
+  // Forwarded test identities are accepted only from this explicitly modeled proxy.
+  process.env.CLIENT_IP_TRUSTED_PROXY_CIDRS = "127.0.0.1/32";
+  process.env.CLIENT_IP_PROXY_HEADER = "x-forwarded-for";
   process.env.DB_PATH = dbPath;
   process.env.ADMIN_BOOTSTRAP_PASSWORD = ADMIN_PASSWORD;
   process.env.ADMIN_TOKEN_SECRET = "admin_token_secret_for_reviewer_route_tests";
@@ -683,24 +686,19 @@ test("reviewer userId-only limiter aggregates verification attempts across sourc
   assert.equal(JSON.stringify(limited.body).includes("reviewer"), false);
 });
 
-test("normal users retain supplemental IP:userId limiting alongside durable account limits", async () => {
+test("normal users retain verified-account limits despite forged IP rotation", async () => {
   const normalOnboard = await captureVerificationCode(() => onboard("normal-rate@example.test"));
   const userId = normalOnboard.result.body.user.id as string;
   const interimToken = normalOnboard.result.body.authToken as string;
 
   clearRateLimitsForTest();
-  for (let attempt = 0; attempt < 21; attempt += 1) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     const result = await verify(userId, "999999", interimToken, {
       forwardedFor: `192.0.2.${attempt + 1}`,
     });
     assert.equal(result.status, 400);
   }
 
-  clearRateLimitsForTest();
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const result = await verify(userId, "999999", interimToken, { forwardedFor: "198.51.100.200" });
-    assert.equal(result.status, 400);
-  }
   const ipLimited = await verify(userId, "999999", interimToken, { forwardedFor: "198.51.100.200" });
   assert.equal(ipLimited.status, 429);
   assert.equal(ipLimited.body.error, "Too many requests. Please wait and retry.");

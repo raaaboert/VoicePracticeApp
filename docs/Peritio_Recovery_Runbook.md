@@ -40,10 +40,17 @@ behavior and snapshot protection remain process-local; see
 
 Related procedures:
 
+- [A2.2 independent PostgreSQL backups: staging tooling and isolated restore preparation](./Peritio_Postgres_Independent_Backups.md)
 - [Peritio Rollback Procedure](./Peritio_Rollback_Procedure.md)
 - [Peritio Config Inventory](./Peritio_Config_Inventory.md)
 - [Peritio Database Bootstrap And Refresh](./Peritio_Database_Bootstrap_Refresh.md)
 - [Peritio Training Content Storage](./Peritio_Training_Content_Storage.md)
+
+A2.2's independent archive tooling remains staging-only and unactivated. Follow
+its linked procedure for a matching encrypted archive/manifest, escrowed key,
+validation-before-publication, isolated restore and plaintext/key disposal. Its
+checksums and encryption do not independently prove Peritio producer identity;
+production automation requires the documented retry and signing/provenance decisions.
 
 ## Immediate Incident Checklist
 
@@ -299,7 +306,8 @@ Production dry run:
 npm run backup:reconcile-training-content -- --target production
 ```
 
-A healthy steady state reports `pending: 0`. A non-zero result requires
+`pending: 0` means no eligible asset lacks a recorded backup. It does not prove
+that objects with historical receipts still exist. A non-zero result requires
 investigation; a dry run does not copy anything.
 
 Staging apply, when explicitly approved:
@@ -319,6 +327,106 @@ An applied run reports `pendingBefore`, `scanned`, `backedUp`,
 `alreadyPresent`, `failed`, and `stillPending`. Healthy completion has zero
 `failed` and zero `stillPending`. Never expose provider messages that contain
 keys or customer data.
+
+### Phase A2.1 retry and dry-run hardening (independent final audit: PASS)
+
+Confirmed failure paths: pending selection and receipt updates excluded
+superseded assets; the copy client accepted only 412 conflicts, while a locked
+existing destination can return 409; the CLI's ordinary store initialization ran
+schema migrations even without `--apply`.
+
+- Retained, nondeleted `ready` and `superseded` final assets remain eligible for
+  retry. Deleted objects, rejected uploads and unfinished temporary files are not
+  added to backup retention. Normal retention cutoffs are unchanged. When backup
+  is enabled, cleanup defers deletion of an unprotected superseded final object
+  and reports `backup_required`; temporary cleanup continues. Repair backup health
+  rather than disabling protection to clear that warning. Pending counts may
+  initially increase as previously excluded superseded assets become eligible.
+- A destination HEAD avoids repeated transfers. Existing bytes must match the
+  recorded key, size, MIME type and ETag when present before recording success.
+  Known locked-destination 409 and conditional 412 races require a destination
+  HEAD, followed by the same metadata validation. Unknown conflicts, missing
+  objects and mismatches fail closed; they do not overwrite backup objects.
+  Investigate a locked destination with mismatched metadata; do not overwrite it
+  or remove its lock to force convergence.
+  ETags are identity metadata, not a claim of universal cryptographic hashing.
+- Backup code does not acquire/release application locks or alter provider lock
+  rules. Conditional destination writes prevent duplicate/conflicting copies.
+  Completion uses the existing idempotent receipt update. Failures retain retry
+  eligibility and increment the backup attempt counter when recording is possible.
+- The CLI no longer loads `.env` files. Supply the approved process/provider
+  environment. Both modes check the existing schema with SELECT only and fail if
+  prerequisites are absent; they never initialize/migrate it. Ordinary application
+  startup migration behavior is unchanged.
+- Default dry-run inventory uses a PostgreSQL READ ONLY transaction, released
+  with rollback, and does not instantiate R2. It makes no data/receipt writes,
+  acquires no advisory/row-write locks, starts no jobs and performs no R2 mutations.
+  It reports `objectVerification: not_requested`.
+- Add `--verify` to either target's dry-run command for bounded read-only R2 HEAD
+  checks, including assets already marked backed up. The database phase
+  materializes only the bounded page IDs/verification metadata, rolls back and
+  releases its connection before constructing R2 or making any HEAD request.
+  Pending counts describe that database snapshot, not a later provider-check
+  time. Each read-only verification HEAD uses the adapter's existing abort-signal
+  support with a 30-second deadline; timeout/cancellation counts as failed work.
+  Missing, mismatched or unreadable objects increase `failed`; missing objects
+  also increase `missing`.
+  Follow each non-null `nextAfter` using `--verify --after-id <asset-UUID>` until
+  it is null. Each invocation is a page, not an atomic full-bucket audit.
+- Authorized `--apply --verify` can repair missing previously recorded copies
+  when source bytes remain. Existing production confirmation requirements apply.
+  A historical receipt is preserved if re-verification fails, so periodic
+  `--verify` remains necessary; pending-only inventory does not detect such loss.
+- Exit status is 0 for the reported scope with no failures/pending work, 2 for
+  failed or remaining work, and 1 for command/configuration/query errors. Read the
+  report and pagination state, not exit status alone. Failed pages and missing
+  sources need operator attention; no scheduler or notification system was added.
+
+Do not run cleanup `--apply` while verification identifies missing backup objects.
+Cleanup still trusts historical backup receipts; resolve missing copies first.
+
+Deferred audit findings: P2-B (ETag/MIME compatibility requires staging R2
+validation), P3-1 (cleanup trusts receipts), P3-2 (cleanup candidate-window
+starvation), P3-3 (pending index optimization), and P3-5 (cosmetic CLI/error
+improvements). No speculative correction for these findings is included here.
+
+Only offline mock/fixture validation is claimed for this batch. Actual R2 copy
+and ETag behavior, lock policy, role privileges, deployed enablement, full object
+coverage, retention and disaster restoration remain unverified. No real backup,
+restore or provider setting change was performed during implementation validation.
+No SQL migration is added.
+Full recovery has not yet been demonstrated; metadata checks do not guarantee
+cryptographic integrity or a successful restore. ETag and MIME-type compatibility
+still require authorized staging R2 validation.
+Initial A2.1 validation: 60 tests passed (19 new regression cases), with dotenv loading
+and outbound sockets/fetch blocked. API and reconciliation CLI/test TypeScript
+checks passed with no emit. A2.1 subsequently passed independent final review.
+Final audit-correction validation: 38 focused offline tests passed, including
+five new cases for release ordering, stalled/aborted HEADs, partial failures and
+rollback failure. No cleanup-script test suite or hosted operation was run.
+
+After the staging release, verify `/meta/environment` reports `staging` and the
+release commit, then confirm `/health` and `/ready` are healthy. Separately
+authorize a synthetic staging R2 check of copied-object ETag/MIME compatibility,
+locked-destination retry convergence and read-only verification pagination/errors.
+Do not run reconciliation or cleanup `--apply`, upload real files or perform a
+restore as part of non-mutating deployment verification. Record results before
+claiming provider-level validation or approving a production release.
+
+## Client-IP Configuration During Deployment Or Recovery
+
+Staging may deploy with fail-closed proxy defaults: leave
+`CLIENT_IP_TRUSTED_PROXY_CIDRS` empty until actual staging socket peers and header
+sanitation are verified. Do not guess Render's trusted ingress CIDRs. Production
+requires verified ingress configuration. Prefer `CLIENT_IP_PROXY_HEADER=cf-connecting-ip`
+over XFF once its overwrite policy and immediate trusted-peer boundary are confirmed.
+Follow the client-IP deployment checks in `api/README.md`, including public/private
+paths and the dashboard's shared egress. Shared proxy-IP limits can lock out
+legitimate users; fallback is secure against spoofed headers but is not per-user
+limiting. A fixed, non-sensitive untrusted-header warning is throttled to once per
+five minutes per API process. IPv6 rate-limit keys use /64 groups while session
+and audit metadata retain full canonical addresses. No provider setting changes
+or hosted verification are implied by these instructions.
 
 ## Hard Deletion Recovery
 
