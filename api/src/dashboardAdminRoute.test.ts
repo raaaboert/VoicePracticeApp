@@ -1398,6 +1398,7 @@ before(async () => {
   process.env.SUPPORT_TRANSCRIPT_SECRET = "support_transcript_secret_for_dashboard_admin_route_tests";
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
   process.env.ENABLE_REMOTE_TTS = "true";
+  process.env.OPENAI_TTS_MODEL = "test-legacy-speech-model"; // HTTP authorization fixture, not a live provider.
   process.env.ENABLE_INTERNAL_DEBUG_ENDPOINTS = "true";
   process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.DATABASE_URL;

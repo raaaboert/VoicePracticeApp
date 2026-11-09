@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:video-worker": "tsx watch src/videoProcessingWorker.ts",
-    "build": "tsc -p tsconfig.json && node ./scripts/copy-sql.mjs",
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-sql.mjs && node ./scripts/verify-speech-runtime.mjs",
+    "verify:speech-runtime": "node ./scripts/verify-speech-runtime.mjs",
+    "test:speech-activity": "node ../scripts/run-tsx-tests.mjs src/services/speechActivity.test.ts src/speechActivityRoute.test.ts",
     "start": "node dist/index.js",
     "start:video-worker": "node dist/videoProcessingWorker.js",
     "run:focus-topic-reminders": "node dist/focusTopicReminderWorker.js",
@@ -33,15 +35,19 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1097.0",
     "@aws-sdk/s3-request-presigner": "^3.1097.0",
+    "@breezystack/lamejs": "1.2.7",
     "@voicepractice/shared": "file:../shared",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.22.3",
     "express-async-errors": "^3.1.1",
+    "ffmpeg-static": "5.3.0",
     "mdast-util-from-markdown": "^2.0.2",
     "multer": "2.5.0",
+    "onnxruntime-node": "1.31.1",
     "pg": "^8.18.0",
     "uuid": "^11.1.1",
+    "ws": "8.22.0",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {

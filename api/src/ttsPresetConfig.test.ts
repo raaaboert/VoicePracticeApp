@@ -9,7 +9,7 @@ import {
 } from "./ttsPresetConfig.js";
 import type { TtsPreset } from "./ttsPresetConfig.js";
 
-const MODEL = "gpt-4o-mini-tts";
+const MODEL = "gpt-realtime-2.1-mini";
 const expected: Record<TtsPreset, { voice: string; speed: number }> = {
   "male-balanced": { voice: "cedar", speed: 1.03 },
   "male-warm": { voice: "cedar", speed: 0.98 },
@@ -106,4 +106,15 @@ test("instructions are sent only for the supported speech model", () => {
   assert.equal(supported.request.instructions, supported.config.instructions);
   assert.equal(unsupported.config.instructionsIncluded, false);
   assert.equal(unsupported.request.instructions, undefined);
+});
+
+test("temporary mini-TTS rollback pins retain persona instructions, voice, speed and MP3 format", () => {
+  for (const model of ["gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-03-20", "gpt-4o-mini-tts-2025-12-15"]) {
+    const { request, config } = buildTtsSpeechRequest({ preset: "female-warm", model, text: "A recovery response." });
+    assert.equal(request.model, model);
+    assert.equal(request.voice, "shimmer");
+    assert.equal(request.speed, 1.03);
+    assert.equal(request.instructions, config.instructions);
+    assert.equal(request.format, "mp3");
+  }
 });

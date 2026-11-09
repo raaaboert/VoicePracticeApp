@@ -11,6 +11,7 @@ import * as unified from "./unifiedSubmit";
 import { createSimulationStartupCoordinator } from "./simulationStartup";
 import * as chunkSequence from "./ttsChunkSequence";
 import * as appLifecycle from "./simulationAppStateLifecycle";
+import * as audioGuard from "./simulationAudioGuard";
 import { createTtsPlaybackHarness, flush } from "./ttsPlayback.testSupport";
 import type { DialogueMessage, SessionTiming } from "../types";
 
@@ -43,7 +44,7 @@ function screenHarness(options: { registrationError?: Error; openingError?: Erro
   const events = { registrations: 0, openings: 0, capture: 0, stopped: 0, cancelled: 0, completions: [] as SessionTiming[], histories: [] as DialogueMessage[][], exits: [] as string[] };
   const state: Record<string, any> = {};
   class LifecycleInterrupted extends Error {}
-  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified, ...recovery, ...chunkSequence, ...appLifecycle,
+  const context: Record<string, any> = { ...errors, ...interaction, ...turnRecovery, ...unified, ...recovery, ...chunkSequence, ...appLifecycle, ...audioGuard,
     startup, config: { simulationSessionId: "same-session", scenario: { id: "scenario", segmentId: "role", title: "Scenario" },
       maxSimulationMinutes: 20, difficulty: "medium", personaStyle: "skeptical" },
     userId: "learner", authToken: "auth", apiConfigured: options.configured ?? true,

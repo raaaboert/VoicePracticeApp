@@ -82,7 +82,8 @@ export function parseTtsPreset(value: unknown): TtsPreset | null {
 }
 
 function ttsModelSupportsInstructions(model: string): boolean {
-  return model.trim().toLowerCase() === "gpt-4o-mini-tts";
+  return ["gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-03-20", "gpt-4o-mini-tts-2025-12-15", "gpt-realtime-2.1-mini"]
+    .includes(model.trim().toLowerCase());
 }
 
 export function resolveTtsRequestConfig(preset: TtsPreset, model: string): TtsRequestConfig {

@@ -223,6 +223,7 @@ import {
   requestSpeechSynthesis,
   requestTranscription
 } from "./openaiClient.js";
+import { analyzeSpeechActivity, cleanupAbandonedSpeechInputs } from "./services/speechActivity.js";
 import {
   buildOpenAiRoutingStartupLogLines,
   resolveSimulationRequestConfig,
@@ -1899,6 +1900,7 @@ async function maybeBuildSimulationSpeechPrefetch(params: {
       requestMaterial: speechRequest,
       ttsCharacters: firstChunk.length,
       invoke: async () => await requestSpeechSynthesis(speechRequest),
+      resolveUsage: (value) => value.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     });
     const ttsResult = budgetedTts.value;
     const completedAtMs = Date.now();
@@ -2394,40 +2396,62 @@ async function resolveSimulationRuntimeBundle(params: {
 
 async function transcribeSimulationAudioFile(params: {
   file: { buffer: Buffer; originalname: string; mimetype: string };
+  request: Request;
+  response: Response;
   route: "transcribe" | "submit-turn";
   correlationId: string;
   budgetContext: AiProviderBudgetContext;
-}): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number; usageEventId: string }> {
+}): Promise<{ text: string; durationMs: number; mimeType: string; bytes: number; usageEventId: string | null }> {
   const startedAtMs = Date.now();
   const mimeType = params.file.mimetype || "audio/m4a";
-  const budgetedTranscription = await invokeAiProviderWithBudget({
-    context: params.budgetContext,
-    kind: "transcribe",
-    model: OPENAI_TRANSCRIPTION_MODEL,
-    promptVersion: AI_PROMPT_VERSION,
-    rubricVersion: null,
-    estimatedTokens: 0,
-    requestMaterial: { audioDigest: crypto.createHash("sha256").update(params.file.buffer).digest("hex"), mimeType, model: OPENAI_TRANSCRIPTION_MODEL },
-    invoke: async () => await requestTranscription({
+  const controller = new AbortController();
+  const cancel = () => { if (!params.response.writableFinished) controller.abort(); };
+  params.request.once("aborted", cancel);
+  params.response.once("close", cancel);
+  if (params.request.aborted || params.response.destroyed) controller.abort();
+  try {
+    const activity = await analyzeSpeechActivity(params.file.buffer, { signal: controller.signal });
+    // Aggregate evidence only: no audio, filenames, transcript, model inputs or levels.
+    console.log("[speech-activity]", { route: params.route, correlationId: params.correlationId,
+      decision: activity.decision, durationMs: activity.durationMs, speechMs: activity.speechMs,
+      elapsedMs: Date.now() - startedAtMs });
+    if (activity.decision !== "speech") return { text: "", durationMs: Date.now() - startedAtMs,
+      mimeType, bytes: params.file.buffer.byteLength, usageEventId: null };
+    controller.signal.throwIfAborted();
+    const budgetedTranscription = await invokeAiProviderWithBudget({
+      context: params.budgetContext,
+      kind: "transcribe",
       model: OPENAI_TRANSCRIPTION_MODEL,
-      audioBuffer: params.file.buffer,
-      fileName: params.file.originalname || "voice-input.m4a",
-      mimeType,
-      language: "en",
-      timeoutMs: SIMULATION_TRANSCRIPTION_TIMEOUT_MS,
-      route: params.route,
-      correlationId: params.correlationId,
-    }),
-  });
-  const text = budgetedTranscription.value;
+      promptVersion: AI_PROMPT_VERSION,
+      rubricVersion: null,
+      estimatedTokens: 0,
+      requestMaterial: { audioDigest: crypto.createHash("sha256").update(params.file.buffer).digest("hex"), mimeType, model: OPENAI_TRANSCRIPTION_MODEL },
+      invoke: async () => await requestTranscription({
+        model: OPENAI_TRANSCRIPTION_MODEL,
+        audioBuffer: params.file.buffer,
+        fileName: params.file.originalname || "voice-input.m4a",
+        mimeType,
+        language: "en",
+        timeoutMs: SIMULATION_TRANSCRIPTION_TIMEOUT_MS,
+        route: params.route,
+        correlationId: params.correlationId,
+        signal: controller.signal,
+      }),
+    });
+    const text = budgetedTranscription.value;
+    controller.signal.throwIfAborted();
 
-  return {
-    text,
-    durationMs: Math.max(0, Date.now() - startedAtMs),
-    mimeType,
-    bytes: params.file.buffer.byteLength,
-    usageEventId: budgetedTranscription.usageEventId,
-  };
+    return {
+      text,
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+      mimeType,
+      bytes: params.file.buffer.byteLength,
+      usageEventId: budgetedTranscription.usageEventId,
+    };
+  } finally {
+    params.request.removeListener("aborted", cancel);
+    params.response.removeListener("close", cancel);
+  }
 }
 
 async function generateSimulationTurnReply(params: {
@@ -23046,6 +23070,8 @@ app.post(
   try {
     const transcription = await transcribeSimulationAudioFile({
       file,
+      request,
+      response,
       route: "transcribe",
       correlationId,
       budgetContext: {
@@ -23075,7 +23101,6 @@ app.post(
         userId,
         bytes: file.buffer.byteLength,
         mimeType: file.mimetype || "audio/m4a",
-        fileName: file.originalname || "voice-input.m4a",
         suspiciouslyTinyAudio: file.buffer.byteLength <= 4_096,
       });
     }
@@ -23095,6 +23120,7 @@ app.post(
 
     if (!context.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        if (!transcription.usageEventId) return;
         await withDatabaseWrite(async (db) => {
           const user = getUserById(db, context.user.id);
           if (!user) {
@@ -23102,7 +23128,7 @@ app.post(
           }
 
           const event: AiUsageEvent = {
-            id: transcription.usageEventId,
+            id: transcription.usageEventId!,
             kind: "transcribe",
             userId: user.id,
             orgId: context.actingOrgId,
@@ -23126,6 +23152,7 @@ app.post(
       });
     }
   } catch (error) {
+    if (response.destroyed) return;
     respondWithAiRouteError(response, error, { route: "transcribe", correlationId: correlationId });
   }
 });
@@ -23326,6 +23353,8 @@ app.post(
   if (!runtime || "bootstrapOrgId" in runtime) return;
   const transcriptionPromise = transcribeSimulationAudioFile({
     file,
+    request,
+    response,
     route: "submit-turn",
     correlationId,
     budgetContext: {
@@ -23344,6 +23373,7 @@ app.post(
   }
 
   if (!transcriptionResult.ok) {
+    if (response.destroyed) return;
     if (responseMode === "transcript_first_v1") {
       registerPendingUnifiedSubmitTurn({ correlationId, userId: accessContext.userId,
         resultPromise: Promise.reject(transcriptionResult.error) });
@@ -23443,6 +23473,7 @@ app.post(
 
     if (!accessContext.isSuperUser) {
       runSimulationPostResponseTask(async () => {
+        if (!transcription.usageEventId) return;
         const anchoredDivisionId = await resolveAnchoredSimulationDivisionId({
           simulationSessionId,
           userId: accessContext.userId,
@@ -23458,7 +23489,7 @@ app.post(
           }
 
           const event: AiUsageEvent = {
-            id: transcription.usageEventId,
+            id: transcription.usageEventId!,
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
@@ -23581,7 +23612,7 @@ app.post(
           });
 
           const transcribeEvent: AiUsageEvent = {
-            id: transcription.usageEventId,
+            id: transcription.usageEventId!,
             kind: "transcribe",
             userId: user.id,
             orgId: accessContext.actingOrgId,
@@ -24085,6 +24116,7 @@ app.post("/mobile/users/:userId/ai/tts", requireMobileAiAuthentication, aiRouteR
         requestMaterial: speechRequest,
         ttsCharacters: text.length,
         invoke: async () => await requestSpeechSynthesis(speechRequest),
+        resolveUsage: (value) => value.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
       });
       return { audioBase64: budgetedTts.value.audioBuffer.toString("base64"), contentType: budgetedTts.value.contentType,
         preset, chunkCount: 1, firstChunkChars: text.length, ttsLatencyMs: Date.now() - ttsCallStartedAtMs! };
@@ -28578,6 +28610,8 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
 });
 
 export async function startApiServer(): Promise<void> {
+  const speechCleanup = await cleanupAbandonedSpeechInputs();
+  if (speechCleanup.removed || speechCleanup.failed) console.log("[speech-activity] startup cleanup", speechCleanup);
   await authVerificationStore.initialize();
   await authVerificationStore.purgeExpired();
   // Explicit migration readiness check only; no 025 DDL at startup.

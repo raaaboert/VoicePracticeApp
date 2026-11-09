@@ -4,6 +4,8 @@ import {
   SIMULATION_AUDIO_GUARD_MIN_DURATION_MS,
   shouldAttemptSimulationTranscription,
   validateSimulationAudioForUpload,
+  emptyRecordingSignal,
+  observeRecordingSignal,
 } from "./simulationAudioGuard";
 
 function assert(condition: boolean, message: string): void {
@@ -147,7 +149,7 @@ runTest("passes conservatively when metadata is unavailable but a URI exists", (
 });
 
 runTest("capture failures provide actionable retry feedback", () => {
-  for (const reason of ["missing_file", "too_small", "too_short", "no_usable_transcript"] as const) {
+  for (const reason of ["missing_file", "too_small", "too_short", "silent_signal", "no_usable_transcript"] as const) {
     const status = getSimulationCaptureFailureStatus(reason);
     assert(status.trim().length > 0, `${reason} should produce a visible status`);
     assert(status.includes("received your response"), `${reason} should acknowledge the submission`);
@@ -155,4 +157,39 @@ runTest("capture failures provide actionable retry feedback", () => {
     assert(status.includes("try again"), `${reason} should explain how to recover`);
     assert(!/bytes|audio guard|STT|URI|VAD/i.test(status), `${reason} should not expose technical jargon`);
   }
+});
+
+function validateLevels(levels: number[], durationMs = 4000) {
+  const signal = emptyRecordingSignal();
+  levels.forEach((level, index) => observeRecordingSignal(signal, level, index * durationMs / Math.max(1, levels.length - 1)));
+  return validateSimulationAudioForUpload({ audioUri: "file:///synthetic.m4a", fileExists: true,
+    audioBytes: 32_000, durationMs, voiceEvidence: false, signal });
+}
+runTest("reliable low flat meters reject near-silence as a client hint, not server speech detection", () => {
+  for (const levels of [Array(16).fill(-80), [-74, -73, -74, -73, -74, -73]]) {
+    const result = validateLevels(levels);
+    assert(!result.ok && result.reason === "silent_signal", "silent capture must stop before ASR, bubbles or scoring");
+  }
+});
+runTest("Android failed-meter sentinel never classifies a recording as silence", () => {
+  assert(validateLevels(Array(16).fill(-160)).ok, "repeated measurement failures must reach server validation");
+  assert(validateLevels([-80, -80, -160, -80, -80, -80]).ok, "a failed interval may contain genuine speech");
+  const signal = emptyRecordingSignal();
+  for (const [index, level] of [-80, -80, undefined, -80, -80].entries()) observeRecordingSignal(signal, level, index * 1000);
+  assert(validateSimulationAudioForUpload({ audioUri: "file:///test.m4a", durationMs: 4000, audioBytes: 32000, signal }).ok,
+    "an unavailable reading invalidates otherwise flat meter evidence");
+});
+runTest("quiet modulated speech and ordinary speech remain controls, without phrase blocklists", () => {
+  for (const levels of [[-89, -76, -80, -73, -82, -75], [-65, -48, -37, -55, -44, -58], [-80, -68, -72, -63, -78, -70]]) {
+    assert(validateLevels(levels).ok, "speech must not depend on old voice-threshold hits");
+  }
+});
+runTest("missing, invalid, stale and sparse meters do not falsely classify quiet speech as silence", () => {
+  for (const levels of [[], [NaN, Infinity, 10], [-160], [-90, -90, -90]]) {
+    assert(validateLevels(levels).ok, "inconclusive metering should reach ASR");
+  }
+  const signal = emptyRecordingSignal();
+  for (const elapsed of [0, 10, 20, 30]) observeRecordingSignal(signal, -100, elapsed);
+  assert(validateSimulationAudioForUpload({ audioUri: "file:///test.m4a", durationMs: 4000, audioBytes: 32000, signal }).ok,
+    "four stale callbacks are not sustained capture evidence");
 });
