@@ -79,6 +79,8 @@ import {
   SIMULATION_AUDIO_GUARD_MIN_DURATION_MS,
   shouldAttemptSimulationTranscription,
   validateSimulationAudioForUpload,
+  emptyRecordingSignal,
+  observeRecordingSignal,
 } from "../lib/simulationAudioGuard";
 import type { SimulationCaptureFailureReason } from "../lib/simulationAudioGuard";
 import { buildNoTranscriptDiagnostics } from "../lib/simulationDiagnostics";
@@ -608,6 +610,7 @@ export function SimulationScreen({
   const heardVoiceRef = useRef(false);
   const detectedVoiceRef = useRef(false);
   const meteringSeenRef = useRef(false);
+  const recordingSignalRef = useRef(emptyRecordingSignal());
   const voiceHitCountRef = useRef(0);
   const noiseFloorDbRef = useRef<number | null>(null);
   const openingStartedRef = useRef(false);
@@ -1898,6 +1901,7 @@ export function SimulationScreen({
       const now = Date.now();
       const elapsed = status.durationMillis ?? now - turnStartedAtRef.current;
 
+      observeRecordingSignal(recordingSignalRef.current, status.metering, elapsed);
       if (typeof status.metering === "number") {
         meteringSeenRef.current = true;
         const priorNoiseFloor = noiseFloorDbRef.current ?? status.metering;
@@ -2127,6 +2131,7 @@ export function SimulationScreen({
       heardVoiceRef.current = false;
       detectedVoiceRef.current = false;
       meteringSeenRef.current = false;
+      recordingSignalRef.current = emptyRecordingSignal();
       voiceHitCountRef.current = 0;
       noiseFloorDbRef.current = null;
       recordingSafetySignalRef.current = null;
@@ -2497,6 +2502,7 @@ export function SimulationScreen({
           audioBytes: audioBytes ?? null,
           durationMs: turnDurationMs,
           voiceEvidence,
+          signal: recordingSignalRef.current,
         });
         logSimulationTiming({
           correlationId,
@@ -2542,7 +2548,9 @@ export function SimulationScreen({
               ? "audio_guard_rejected_missing_file"
               : audioGuardResult.reason === "too_small"
                 ? "audio_guard_rejected_too_small"
-                : "audio_guard_rejected_too_short";
+                : audioGuardResult.reason === "silent_signal"
+                  ? "audio_guard_rejected_silence"
+                  : "audio_guard_rejected_too_short";
           logSimulationTiming({
             correlationId,
             phase: rejectionPhase,
@@ -5114,13 +5122,17 @@ export function SimulationScreen({
                   </Text>
                   <Text
                     lineBreakStrategyIOS="standard"
+                    textBreakStrategy="simple"
+                    android_hyphenationFrequency="none"
                     style={[
                       styles.messageText,
                       useCompactTranscript ? styles.messageTextCompact : null,
                       message.role === "user" ? styles.userMessageText : styles.aiMessageText,
-                      messageWidthConstraints
-                        ? { width: messageWidthConstraints.textMaxWidth }
-                        : null,
+                      Platform.OS === "android"
+                        ? { alignSelf: "stretch", minWidth: 0, flexShrink: 1 }
+                        : messageWidthConstraints
+                          ? { width: messageWidthConstraints.textMaxWidth }
+                          : null,
                     ]}
                   >
                     {normalizeTranscriptText(message.content)}
@@ -5797,12 +5809,13 @@ function createStyles(palette: SimulationPalette) {
     },
     messageText: {
       fontSize: 14.5,
-      // iOS height-rounding safeguard; native clipping still needs device validation.
-      lineHeight: Platform.OS === "ios" ? 21.001 : 21,
+      // Retain the iOS height-rounding safeguard; Android uses scaled native font metrics.
+      lineHeight: Platform.OS === "ios" ? 21.001 : undefined,
+      includeFontPadding: true,
     },
     messageTextCompact: {
       fontSize: 13.5,
-      lineHeight: Platform.OS === "ios" ? 19.001 : 19,
+      lineHeight: Platform.OS === "ios" ? 19.001 : undefined,
     },
     userMessageText: {
       color: "#f8f0df",

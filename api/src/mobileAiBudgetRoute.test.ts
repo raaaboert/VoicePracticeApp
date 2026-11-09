@@ -167,6 +167,7 @@ before(async () => {
   process.env.AUTH_CODE_DELIVERY_PROVIDER = "log_only";
   process.env.OPENAI_API_KEY = "test-openai-key";
   process.env.ENABLE_REMOTE_TTS = "true";
+  process.env.OPENAI_TTS_MODEL = "test-legacy-speech-model"; // Existing HTTP transport/accounting fixture.
   process.env.OPENAI_MAX_DAILY_CALLS_PER_USER = "1";
   process.env.OPENAI_MAX_DAILY_CALLS_GLOBAL = "4";
   process.env.OPENAI_MAX_DAILY_TOKENS_PER_USER = "1000000";

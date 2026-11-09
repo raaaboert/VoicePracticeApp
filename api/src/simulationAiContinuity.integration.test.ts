@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { syntheticSpeechAudio } from "./services/speechActivity.testSupport.js";
 import { createHmac } from "node:crypto";
 import type { Server } from "node:http";
 import { createServer } from "node:http";
@@ -26,7 +27,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       ADMIN_TOKEN_SECRET: "continuity_local_admin_secret_32_characters", ADMIN_BOOTSTRAP_PASSWORD: "continuity_local_password",
       SUPPORT_TRANSCRIPT_SECRET: "continuity_local_support_secret_32_characters", AUTH_CODE_DELIVERY_PROVIDER: "log_only",
       TRAINING_CONTENT_STORAGE_PROVIDER: "disabled", ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false", ENABLE_REMOTE_TTS: "true",
-      OPENAI_API_KEY: "local-only-mocked-key", OPENAI_MAX_DAILY_CALLS_GLOBAL: "3", OPENAI_MAX_DAILY_TOKENS_GLOBAL: "2000",
+      OPENAI_API_KEY: "local-only-mocked-key", OPENAI_TTS_MODEL: "test-legacy-speech-model", OPENAI_MAX_DAILY_CALLS_GLOBAL: "3", OPENAI_MAX_DAILY_TOKENS_GLOBAL: "2000",
       OPENAI_MAX_DAILY_CALLS_PER_USER: "2", OPENAI_MAX_DAILY_TOKENS_PER_USER: "2000" });
     await db.migrate();
     const api = await import("./index.js");
@@ -159,7 +160,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       const submit = async (responseMode = "transcript_first_v1") => {
         const form = new FormData();
         form.append("payload", JSON.stringify({ ...requestContext(id), history, responseMode }));
-        form.append("file", new Blob([new Uint8Array(8192)], { type: "audio/m4a" }), "voice.m4a");
+        form.append("file", new Blob([syntheticSpeechAudio()], { type: "audio/m4a" }), "voice.m4a");
         return originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/submit-turn`, { method: "POST",
           headers: { Authorization: `Bearer ${tokens[0]}` }, body: form });
       };
@@ -237,7 +238,7 @@ test("PostgreSQL HTTP authorized simulation continuity preserves speech, scoring
       const opening = await call("ai/opening", { ...requestContext(id), speechPrefetch: { preset: "female-balanced" } });
       assert.equal(opening.status, 200, await opening.clone().text()); const opened = await opening.json() as any;
       assert.equal(typeof opened.speechAuthorization, "string");
-      const form = new FormData(); form.append("simulationSessionId", id); form.append("file", new Blob([new Uint8Array(8192)], { type: "audio/m4a" }), "voice.m4a");
+      const form = new FormData(); form.append("simulationSessionId", id); form.append("file", new Blob([syntheticSpeechAudio()], { type: "audio/m4a" }), "voice.m4a");
       const transcription = await originalFetch(`${base}/mobile/users/${users[0]!.id}/ai/transcribe`, { method: "POST", headers: { Authorization: `Bearer ${tokens[0]}` }, body: form });
       assert.equal(transcription.status, 200, await transcription.clone().text());
       const turn = await call("ai/turn", { ...requestContext(id), history }); assert.equal(turn.status, 200, await turn.clone().text());

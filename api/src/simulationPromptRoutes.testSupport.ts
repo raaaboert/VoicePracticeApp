@@ -486,6 +486,7 @@ export async function startPromptRouteHarness(params: {
   scoringModel?: string;
   scoringReasoningEffort?: string;
   remoteTtsEnabled?: boolean;
+  speechModel?: string;
 }): Promise<PromptRouteHarness> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "simulation-prompt-routes-"));
   const dbPath = path.join(tempDir, "db.local.json");
@@ -507,6 +508,7 @@ export async function startPromptRouteHarness(params: {
     params.scoringReasoningEffort,
   );
   if (params.remoteTtsEnabled) process.env.ENABLE_REMOTE_TTS = "true";
+  process.env.OPENAI_TTS_MODEL = params.speechModel ?? "gpt-realtime-2.1-mini";
 
   const imported = await import("./index.js");
   const trainingPacks = params.trainingPacks ?? [];

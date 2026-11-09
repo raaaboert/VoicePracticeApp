@@ -91,8 +91,8 @@ OPENAI_SIMULATION_OPENING_MAX_OUTPUT_TOKENS=
 OPENAI_SIMULATION_TURN_MAX_OUTPUT_TOKENS=
 OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS=
 OPENAI_SIMULATION_MAX_OUTPUT_TOKENS=
-OPENAI_TRANSCRIPTION_MODEL=whisper-1
-OPENAI_TTS_MODEL=tts-1
+OPENAI_TRANSCRIPTION_MODEL=gpt-transcribe
+OPENAI_TTS_MODEL=gpt-realtime-2.1-mini
 ENABLE_REMOTE_TTS=false
 OPENAI_MAX_DAILY_CALLS_PER_USER=
 OPENAI_MAX_DAILY_CALLS_GLOBAL=
@@ -249,16 +249,17 @@ Do not enable forwarded-header trust merely to pass this gate.
 - Mobile user routes require a per-user mobile bearer token issued by `POST /mobile/onboard`.
 - `MOBILE_REVERIFY_ON_ONBOARD` defaults to `true` in production and `false` otherwise.
 - AI budget caps default in production when `OPENAI_API_KEY` is set (`120` per-user calls/day, `1500` global calls/day, `250000` per-user tokens/day, `2000000` global tokens/day).
-- `OPENAI_CHAT_MODEL` applies to admin custom-scenario generation. The recommended deployed profile uses `gpt-5.4-mini`, `OPENAI_CHAT_API_FAMILY=responses`, and `OPENAI_CHAT_REASONING_EFFORT=low`. When these variables are omitted, the compatibility defaults remain `gpt-4o-mini`, `chat_completions`, and no reasoning effort.
+- `OPENAI_CHAT_MODEL` applies to admin custom-scenario generation. The explicitly configured `gpt-5.4-mini` Responses/low profile remains supported. Omitted values now use `gpt-6-luna`, `chat_completions`, and reasoning `none`; retiring GPT-4o-mini pins also migrate to Luna. Scenario generation inherits this unless independently configured.
 - `OPENAI_SIMULATION_MODEL` applies to live simulation routes (`/ai/opening` and `/ai/turn`) and defaults to `gpt-5.4`.
 - `OPENAI_SIMULATION_API_FAMILY` accepts `chat_completions` or `responses`. The recommended `gpt-5.4` default uses `responses`; a compatibility fallback also keeps `gpt-5.2-chat-latest` on `responses`.
 - `OPENAI_SIMULATION_REASONING_EFFORT` applies to both opening and live turns. Existing `OPENAI_SIMULATION_OPENING_REASONING_EFFORT` and `OPENAI_SIMULATION_TURN_REASONING_EFFORT` values remain supported as fallbacks when the shared setting is omitted.
 - `OPENAI_SCORING_MODEL`, `OPENAI_SCORING_API_FAMILY`, and `OPENAI_SCORING_REASONING_EFFORT` independently configure `/ai/score`. When omitted, scoring inherits the simulation model/API family and the legacy `OPENAI_SIMULATION_SCORE_REASONING_EFFORT` fallback.
 - Reasoning-effort settings accept `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`; confirm support for the selected model before setting them.
-- The `gpt-5.4` compatibility defaults use `low` reasoning for opening, turn, and score. Other explicitly selected models omit reasoning effort unless configured.
+- The `gpt-5.4` compatibility defaults use `low` reasoning for opening, turn, and score. Luna defaults to `none`; other explicitly selected models omit reasoning effort unless configured.
 - Route-specific simulation cap defaults are `160` for opening, `220` for turn, and `1200` for score. Use `OPENAI_SIMULATION_OPENING_MAX_OUTPUT_TOKENS`, `OPENAI_SIMULATION_TURN_MAX_OUTPUT_TOKENS`, and `OPENAI_SIMULATION_SCORE_MAX_OUTPUT_TOKENS` to override them independently.
 - `OPENAI_SIMULATION_MAX_OUTPUT_TOKENS` remains supported as a legacy aggregate fallback. A route-specific cap takes precedence when both are set.
-- `OPENAI_TRANSCRIPTION_MODEL` defaults to `whisper-1`. Optional remote speech synthesis uses `OPENAI_TTS_MODEL` (`tts-1` by default) when `ENABLE_REMOTE_TTS=true`.
+- `OPENAI_TRANSCRIPTION_MODEL` defaults to `gpt-transcribe` with JSON output and a `languages[]` string hint. Optional chunking settings are omitted; model-side chunking is not proof of speech. Both mobile transcription routes first use packaged FFmpeg and local CPU Silero VAD to check decoded audio independently of mobile meters and ASR text. Silence, uncertain speech and invalid audio use the existing empty/no-clear-speech response; technical detector failures return the existing retryable `503 ai_unavailable`. No ASR or assistant request is made for rejected audio. The check is bounded to 12 MiB/180 seconds, with one active analysis and a bounded queue per API process. AAC/M4A plus finalized WAV, MP3, FLAC, Ogg and WebM controls are tested. Encoded input uses a private, request-scoped temporary file for seekable decoding; PCM stays in memory. Normal completion, errors, timeout and disconnect remove the input. Startup performs bounded cleanup of old PID-qualified temporary folders only when the owner is confirmed exited, preserving active/fresh/unknown folders. Abrupt termination, a cleanup backlog or legacy folders can still leave temporary input; see the operational limits in the linked notes. `npm run build:api` includes an actual decoder/native CPU/model preflight; `npm run verify:speech-runtime --workspace api` reruns that check without starting the API. Missing runtime assets fail audio requests closed without breaking unrelated API startup. Linux execution and real-microphone accuracy remain release gates; see [migration and validation notes](../docs/Peritio_Mobile_Stabilization_Model_Migration_2026-11-09.md).
+- Known retiring Whisper pins migrate, but explicit `OPENAI_TTS_MODEL` pins remain available for temporary rollback (prefer the previous `gpt-4o-mini-tts` model/presets, before its January 6, 2027 shutdown). Omitted TTS configuration defaults to `gpt-realtime-2.1-mini` when `ENABLE_REMOTE_TTS=true`. Realtime uses a bounded server-only WebSocket per existing speech chunk, then encodes 24 kHz PCM to MP3. Mobile endpoints, authorization, retries and request deadlines are preserved. `ENABLE_REMOTE_TTS=false` still disables API speech; it does not guarantee device-voice fallback in installed apps configured to require remote speech. Outbound WSS and access to the new models require staging verification.
 - Usage billing increments are 15 seconds (round-down behavior).
 - Timezone changes are scheduled for next monthly renewal.
 - Remote AI is optional and API-owned. Mobile calls API AI routes; API calls OpenAI.

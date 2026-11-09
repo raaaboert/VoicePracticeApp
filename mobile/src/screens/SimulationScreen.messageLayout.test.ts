@@ -72,8 +72,8 @@ function renderMessages(params: { viewportWidth: number; compact: boolean; theme
   const constraints = getSimulationMessageWidthConstraints(params);
   const { createStyles } = loadStyles(params.platform ?? "ios");
   const render = new Function("require", "exports", "View", "Text", "messages", "styles", "useCompactTranscript",
-    "messageWidthConstraints", "normalizeTranscriptText", `${renderCode}; return render;`)(
-    require, {}, "View", "Text", messages, createStyles(palettes[params.theme]), params.compact, constraints, normalizeTranscriptText,
+    "messageWidthConstraints", "normalizeTranscriptText", "Platform", `${renderCode}; return render;`)(
+    require, {}, "View", "Text", messages, createStyles(palettes[params.theme]), params.compact, constraints, normalizeTranscriptText, { OS: params.platform ?? "ios" },
   );
   return { bubbles: render(), messages, constraints };
 }
@@ -108,7 +108,7 @@ test("actual transcript JSX selects iOS-only body line heights across roles, lay
   for (const platform of ["ios", "android"] as const) {
     for (const compact of [false, true]) for (const theme of ["light", "dark"] as const) {
       const { bubbles } = renderMessages({ platform, compact, theme, viewportWidth: 390, content: "First line.\nSecond line." });
-      const expectedHeight = platform === "ios" ? (compact ? 19.001 : 21.001) : (compact ? 19 : 21);
+      const expectedHeight = platform === "ios" ? (compact ? 19.001 : 21.001) : undefined;
       for (const bubble of bubbles) {
         const [role, body] = bubble.props.children;
         const bodyStyle = flatten(body.props.style);
@@ -160,4 +160,22 @@ test("user and AI bubbles retain their existing alignment and transcript normali
   assert.match(styleBlock("userBubble", "aiBubble"), /alignSelf: "flex-end"/);
   assert.match(styleBlock("aiBubble", "messageRole"), /alignSelf: "flex-start"/);
   assert.match(source, /\{normalizeTranscriptText\(message\.content\)\}/);
+});
+
+test("Android lets native font metrics and the bubble inner width control wrapping at every width", () => {
+  for (const viewportWidth of [280, 320, 375, 390, 768]) for (const compact of [true, false]) {
+    const { bubbles } = renderMessages({ viewportWidth, compact, theme: "dark", platform: "android", content: "Long word ".repeat(100) });
+    for (const bubble of bubbles) {
+      const body = bubble.props.children[1];
+      const style = flatten(body.props.style);
+      assert.equal(style.width, undefined, "avoid a separately rounded text width");
+      assert.equal(style.alignSelf, "stretch");
+      assert.equal(style.lineHeight, undefined, "native font scaling determines line metrics");
+      assert.equal(style.includeFontPadding, true);
+      assert.equal(body.props.textBreakStrategy, "simple");
+      assert.equal(body.props.android_hyphenationFrequency, "none");
+      assert.equal(body.props.allowFontScaling, undefined, "system font scaling stays enabled");
+      assert.equal(style.height, undefined);
+    }
+  }
 });

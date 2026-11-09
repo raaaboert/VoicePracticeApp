@@ -8,7 +8,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 COPY api/package.json ./api/package.json
 COPY shared/package.json ./shared/package.json
 COPY admin-web/package.json ./admin-web/package.json
