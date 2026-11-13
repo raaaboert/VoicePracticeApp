@@ -9,6 +9,7 @@ import {
   privateBackupDirectory, readBackupHeader, removeBackupDirectory, requireBackup, validateRenderArchive,
   type ArchiveDigest, type BackupHeader,
   POSTGRES_BACKUP_TARGETS, type BackupEnvironment,
+  postgresBackupFailureCode,
 } from "./postgresBackupArchive.js";
 
 export interface PostgresBackupConfig {
@@ -89,7 +90,10 @@ export function loadPostgresBackupConfig(target: string | undefined, env: NodeJS
   requireBackup(renderDatabaseName === profile.renderName, "backup_database_environment_mismatch");
   const account = value(env, "PG_BACKUP_R2_ACCOUNT_ID");
   requireBackup(/^[a-f0-9]{32}$/i.test(account), "invalid_r2_account");
-  const endpoint = new URL(value(env, "PG_BACKUP_R2_ENDPOINT"));
+  const endpointValue = value(env, "PG_BACKUP_R2_ENDPOINT");
+  let endpoint: URL;
+  try { endpoint = new URL(endpointValue); }
+  catch { throw new PostgresBackupError("invalid_r2_endpoint"); }
   requireBackup(endpoint.origin === `https://${account.toLowerCase()}.r2.cloudflarestorage.com`
     && endpoint.pathname === "/" && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash, "invalid_r2_endpoint");
   const hosts = (env.PG_BACKUP_DOWNLOAD_HOSTS ?? "").split(",").map(host => host.trim().toLowerCase()).filter(Boolean);
@@ -120,18 +124,37 @@ export async function validatePostgresBackupSource(config: PostgresBackupConfig,
     && identity.available && /^1[1-8]$/.test(identity.version), "render_database_identity_mismatch");
   return identity;
 }
+async function readBackupPublicKey(file: string, signal: AbortSignal): Promise<string> {
+  requireBackup(file, "public_key_file_required");
+  let pem: string;
+  try {
+    signal.throwIfAborted();
+    const info = await stat(file);
+    requireBackup(info.isFile(), "public_key_file_unreadable");
+    requireBackup(info.size <= 65_536, "public_key_file_limit");
+    pem = await readFile(file, { encoding: "utf8", signal });
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    if (error instanceof PostgresBackupError) throw error;
+    throw new PostgresBackupError("public_key_file_unreadable");
+  }
+  backupKeyId(pem);
+  return pem;
+}
 /** Configuration/GET/List preflight only. No export request, upload or deletion. */
 export async function dryRunIndependentPostgresBackup(config: PostgresBackupConfig, deps: PostgresBackupDependencies,
   signal = AbortSignal.timeout(300_000)) {
   signal.throwIfAborted();
   const prefix = backupPrefix(config);
-  requireBackup(config.renderApiKey && config.publicKeyFile && config.downloadHosts.length, "export_credentials_or_public_key_missing");
-  requireBackup((await stat(config.publicKeyFile)).size <= 65_536, "public_key_file_limit");
-  backupKeyId(await readFile(config.publicKeyFile, "utf8"));
-  await validatePostgresBackupSource(config, deps.source, signal);
-  const keys = await deps.storage.manifests(prefix, signal);
-  requireBackup(keys.length <= 100, "manifest_list_limit");
-  keys.forEach(key => keyDay(key, config));
+  requireBackup(config.renderApiKey && config.downloadHosts.length, "export_credentials_or_public_key_missing");
+  await readBackupPublicKey(config.publicKeyFile, signal);
+  try { await validatePostgresBackupSource(config, deps.source, signal); }
+  catch (error) { throw new PostgresBackupError(postgresBackupFailureCode(error), "source_identity"); }
+  try {
+    const keys = await deps.storage.manifests(prefix, signal);
+    requireBackup(keys.length <= 100, "manifest_list_limit");
+    keys.forEach(key => keyDay(key, config));
+  } catch (error) { throw new PostgresBackupError(postgresBackupFailureCode(error), "destination"); }
   return { outcome: "dry_run_validated", environment: config.environment, sourceIdentityVerified: true,
     destinationListVerified: true, encryptionKeyVerified: true, mutationsPerformed: false };
 }
@@ -204,9 +227,9 @@ export async function runIndependentPostgresBackup(config: PostgresBackupConfig,
     let stored = await deps.storage.head(archiveKey, signal);
     let header: BackupHeader, digest: ArchiveDigest;
     if (!stored) {
-      requireBackup(config.renderApiKey && config.publicKeyFile && config.downloadHosts.length, "export_credentials_or_public_key_missing");
+      requireBackup(config.renderApiKey && config.downloadHosts.length, "export_credentials_or_public_key_missing");
       const identity = await validatePostgresBackupSource(config, deps.source, signal);
-      const publicKey = await readFile(config.publicKeyFile, "utf8"); backupKeyId(publicKey);
+      const publicKey = await readBackupPublicKey(config.publicKeyFile, signal);
       const select = (exports: RenderExport[]) => {
         requireBackup(exports.length <= 100, "render_export_list_limit");
         for (const item of exports) requireBackup(typeof item.id === "string" && item.id.length > 0
@@ -298,6 +321,8 @@ export function createIndependentBackupStorage(config: PostgresBackupConfig, sup
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
     try { return await client.send(command, { abortSignal: deadline }); }
     catch (error) {
+      const candidate = error as { name?: string; Code?: string };
+      if (candidate?.name === "NoSuchBucket" || candidate?.Code === "NoSuchBucket") throw postgresProviderFailure("r2", error, deadline);
       // Preserve absence and conditional/lock-conflict handling at the caller.
       if ([404, 409, 412].includes(status(error) ?? 0)) throw error;
       throw postgresProviderFailure("r2", error, deadline);
@@ -331,7 +356,14 @@ export function createIndependentBackupStorage(config: PostgresBackupConfig, sup
     },
     async manifests(prefix, signal) {
       requireBackup(prefix === backupPrefix(config), "invalid_backup_prefix");
-      const result = await send(new ListObjectsV2Command({ Bucket: config.bucket, Prefix: prefix, MaxKeys: 1000 }), signal);
+      let result;
+      try { result = await send(new ListObjectsV2Command({ Bucket: config.bucket, Prefix: prefix, MaxKeys: 1000 }), signal); }
+      catch (error) {
+        // A ListObjects request has no object key: a 404 here is a missing bucket,
+        // unlike HeadObject's ordinary missing-object result.
+        if (status(error) === 404) throw new PostgresBackupError("r2_destination_bucket_not_found");
+        throw error;
+      }
       requireBackup(!result.IsTruncated, "backup_listing_truncated");
       return (result.Contents ?? []).map((item: { Key?: string }) => item.Key).filter((key: string | undefined) => key?.endsWith("/complete.json"));
     },

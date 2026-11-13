@@ -11,7 +11,7 @@ import {
   loadPostgresBackupConfig, runIndependentPostgresBackup, validateBackupManifest, dryRunIndependentPostgresBackup,
   type BackupManifest, type IndependentBackupStorage, type PostgresBackupConfig, type RenderBackupSource,
 } from "./postgresBackup.js";
-import { assertScratchRestoreTarget, backupKeyId, byteLimit, DAY_MS, decryptBackup, digestArchive, encryptBackup, postgresBackupFailureCode, postgresProviderFailure,
+import { assertScratchRestoreTarget, backupKeyId, byteLimit, DAY_MS, decryptBackup, digestArchive, encryptBackup, postgresBackupFailureCode, postgresBackupFailurePhase, postgresProviderFailure,
   PostgresBackupError, privateBackupDirectory, readBackupHeader, removeBackupDirectory, validateRenderArchive } from "./postgresBackupArchive.js";
 
 const KEY = generateKeyPairSync("rsa", { modulusLength: 3072,
@@ -177,6 +177,70 @@ test("dry-run checks identity, public key and list permission with no exports, t
     const result = await dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source });
     assert.equal(result.outcome, "dry_run_validated"); assert.equal(result.environment, target); assert.equal(result.mutationsPerformed, false);
     h.invalidIdentity(); await assert.rejects(dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source }), /render_database_identity_mismatch/);
+  }
+});
+
+test("malformed R2 endpoints have a fixed configuration diagnostic in both environments", () => {
+  for (const target of ["staging", "production"] as const) {
+    const env = target === "production" ? PRODUCTION_ENV : ENV;
+    for (const endpoint of ["not a URL: synthetic-secret", "https://bad host/?token=synthetic-secret", "https://wrong.example/?token=synthetic-secret"]) {
+      assert.throws(() => loadPostgresBackupConfig(target, { ...env, PG_BACKUP_R2_ENDPOINT: endpoint }), error => {
+        assert.equal(postgresBackupFailureCode(error), "invalid_r2_endpoint");
+        assert.equal(postgresBackupFailurePhase(error), "configuration");
+        assert.equal(JSON.stringify(error).includes("synthetic-secret"), false); return true;
+      });
+    }
+  }
+});
+
+test("public-key file and parser diagnostics are shared by dry-run and run, without export or upload", async t => {
+  for (const mode of ["dry-run", "run"] as const) {
+    for (const [failure, code] of [["missing", "public_key_file_unreadable"], ["directory", "public_key_file_unreadable"],
+      ["empty-path", "public_key_file_required"], ["pem", "invalid_public_key"], ["private", "public_key_file_required"],
+      ["large", "public_key_file_limit"]] as const) {
+      const h = await harness(t, {}, "production");
+      if (failure === "missing") h.config.publicKeyFile = path.join(h.directory, "synthetic-secret-missing.pem");
+      else if (failure === "directory") h.config.publicKeyFile = h.directory;
+      else if (failure === "empty-path") h.config.publicKeyFile = "";
+      else await writeFile(h.config.publicKeyFile, failure === "private" ? KEY.privateKey : failure === "large" ? "x".repeat(65_537)
+        : "-----BEGIN PUBLIC KEY-----\nsynthetic-secret-invalid-pem\n-----END PUBLIC KEY-----");
+      await assert.rejects(mode === "run" ? h.run() : dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source }), error => {
+        assert.equal(postgresBackupFailureCode(error), code); assert.equal(postgresBackupFailurePhase(error), "public_key");
+        const json = JSON.stringify(error); assert.equal(json.includes("synthetic-secret"), false);
+        assert.equal(json.includes("BEGIN"), false); assert.equal(json.includes(h.directory), false); return true;
+      });
+      assert.equal(h.posts(), 0); assert.equal(h.downloads(), 0); assert.equal(h.storage.objects.size, 0);
+    }
+  }
+});
+
+test("R2 listing 404 and explicit NoSuchBucket have a destination diagnostic; missing objects still return null", async t => {
+  const h = await harness(t, {}, "production");
+  for (const missing of [{ name: "NotFound", $metadata: { httpStatusCode: 404 } },
+    { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } }, { Code: "NoSuchBucket" }]) {
+    const storage = createIndependentBackupStorage(h.config, { send: async () => { throw { ...missing, message: "synthetic-secret https://signed.example/?token=secret" }; } });
+    await assert.rejects(storage.manifests(backupPrefix(h.config), new AbortController().signal), error => {
+      assert.equal(postgresBackupFailureCode(error), "r2_destination_bucket_not_found");
+      assert.equal(postgresBackupFailurePhase(error), "destination");
+      assert.equal(JSON.stringify(error).includes("synthetic-secret"), false); return true;
+    });
+  }
+  const absent = createIndependentBackupStorage(h.config, { send: async () => { throw { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } }; } });
+  assert.equal(await absent.head(`${backupPrefix(h.config)}2026-11-03/archive.pgbak`, new AbortController().signal), null);
+  const noBucket = createIndependentBackupStorage(h.config, { send: async () => { throw { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } }; } });
+  await assert.rejects(noBucket.head(`${backupPrefix(h.config)}2026-11-03/archive.pgbak`, new AbortController().signal), /r2_destination_bucket_not_found/);
+});
+
+test("unknown dry-run errors retain a fixed phase without raw exception details", async t => {
+  for (const phase of ["source_identity", "destination"] as const) {
+    const h = await harness(t, {}, "production");
+    const fail = async () => { throw Error("synthetic-secret https://signed.example/?token=secret"); };
+    if (phase === "source_identity") h.source.identity = fail; else h.storage.manifests = fail;
+    await assert.rejects(dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source }), error => {
+      assert.equal(postgresBackupFailureCode(error), "postgres_backup_failed");
+      assert.equal(postgresBackupFailurePhase(error), phase);
+      assert.equal(JSON.stringify(error).includes("synthetic-secret"), false); return true;
+    });
   }
 });
 
@@ -403,6 +467,10 @@ test("timeouts, cancellation and unknown failures have fixed diagnostics without
   assert.equal(postgresProviderFailure("r2", { name: "AccessDenied", message: "synthetic-secret" }).code, "r2_permission_denied");
   assert.equal(postgresProviderFailure("r2", { code: "ETIMEDOUT", message: "synthetic-secret" }).code, "r2_timeout");
   assert.equal(postgresBackupFailureCode(new Error("synthetic-secret https://signed.example/")), "postgres_backup_failed");
+  assert.equal(postgresBackupFailurePhase(new Error("synthetic-secret https://signed.example/")), undefined);
+  assert.equal(postgresBackupFailurePhase(new PostgresBackupError("public_key:https://signed.example/secret")), undefined);
+  assert.equal(postgresBackupFailurePhase({ phase: "https://signed.example/secret", code: "invalid_public_key" }), undefined);
+  assert.equal(postgresBackupFailurePhase(new PostgresBackupError("postgres_backup_failed", "https://signed.example/secret" as any)), undefined);
   assert.equal(postgresBackupFailureCode(new PostgresBackupError("https://signed.example/secret")), "postgres_backup_failed");
   const controller = new AbortController(); controller.abort(new PostgresBackupError("backup_cancelled"));
   assert.equal(postgresProviderFailure("render", Error("synthetic-secret"), controller.signal).code, "backup_cancelled");
