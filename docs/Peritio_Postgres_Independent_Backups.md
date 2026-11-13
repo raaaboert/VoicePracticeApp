@@ -136,7 +136,8 @@ The newest malformed slot fails closed rather than silently accepting an older o
 A truncated or oversized listing
 also fails. Neither check imports application schema initialization.
 
-Any CLI error exits 1 with a fixed error code; provider error messages, URLs,
+Any CLI error exits 1 with a fixed error code and, where known, a fixed failure
+phase (`configuration`, `public_key`, `source_identity` or `destination`); provider error messages, URLs,
 credentials, paths, object keys and records are excluded. Render execution/build
 failure notifications must be enabled and tested. A stopped scheduler cannot
 alert through itself: activate the separately scheduled read-only freshness check
@@ -147,17 +148,29 @@ Safe operator error categories (F6), without raw provider messages:
 
 | Code / family | Operator interpretation |
 | --- | --- |
+| `public_key_file_unreadable` | The configured public PEM file is missing, unreadable or not a regular file; phase `public_key`. Privately verify the Cron secret-file mount and exact configured path. No filename or filesystem exception is logged. |
+| `invalid_public_key` | Public PEM parsing failed; phase `public_key`. Check the mounted public-only SPKI PEM, not the private recovery key. Existing public-only and RSA minimum-strength rejections remain distinct and use the same phase. |
+| `invalid_r2_endpoint` | Malformed URL or endpoint/account mismatch; phase `configuration`. Use the documented HTTPS account endpoint; no URL is logged. |
+| `r2_destination_bucket_not_found` | Explicit `NoSuchBucket`, or a 404 from bucket listing; phase `destination`. Check the configured account/bucket and scoped token privately. Ordinary missing-object HEAD responses still mean object absence, not missing bucket. |
+| `postgres_backup_failed` with a phase | An unclassified dry-run exception is limited to a fixed `source_identity` or `destination` phase, without raw exception details. Unknown failures outside a known phase remain generic. |
 | `render_authentication_failed`, `render_authorization_failed` | Check API credential validity and permission, or download-link access/expiry if downloading |
 | `render_rate_limited` | Provider throttling; automatic backoff is deferred |
 | `render_server_error`, `render_api_unavailable` | Render service or transport failure; preserve the previous archive |
 | `render_timeout`, `render_export_timeout` | Request/download deadline or export did not become ready within the bounded polling window |
 | `render_export_create_uncertain` | POST may have been accepted; existing logic re-lists without another POST in that run |
-| `r2_permission_denied`, `r2_rate_limited`, `r2_server_error`, `r2_timeout` | Check the dedicated staging bucket's permission, provider health or transfer deadline |
+| `r2_permission_denied`, `r2_rate_limited`, `r2_server_error`, `r2_timeout` | Check the selected environment's dedicated bucket permission, provider health or transfer deadline |
 | `archive_checksum_mismatch`, `manifest_header_mismatch`, `invalid_backup_manifest`, `archive_authentication_or_decryption_failed`, `export_archive_validation_failed` | Verification failed; no final plaintext output is published |
 | `wrong_recovery_key`, `invalid_recovery_key`, `archive_key_unwrap_failed` | Recover the correct historical keyId/format; do not replace old archives or generate a substitute key |
 | `backup_cancelled`, `backup_timeout`, `plaintext_cleanup_failed` | Cancellation/deadline or unsuccessful scratch cleanup; privately inspect the protected workspace |
 
 No new retry/backoff policy is implied by these classifications.
+For example, a missing public-key mount now reports
+`{"outcome":"failed","code":"public_key_file_unreadable","phase":"public_key"}`.
+Public-key file checks are shared by dry-run and a new archive run, capped at
+64 KiB, and preserve cancellation. No raw error messages/stacks, PEM contents,
+credentials, object keys or URLs are added to logs. The diagnostics patch was
+validated with 59/59 focused offline tests plus API/CLI TypeScript checks on
+Node 24.22.2; no hosted dry-run or backup was executed for that validation.
 
 ## Owner setup — after independent review and separate staging-run authorization
 

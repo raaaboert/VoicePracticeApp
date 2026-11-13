@@ -17,9 +17,10 @@ export const POSTGRES_BACKUP_TARGETS = {
   production: { databaseName: "peritio_db_prod", renderName: "peritio-db-prod", bucket: "peritio-postgres-backups-production" },
 } as const;
 export type BackupEnvironment = keyof typeof POSTGRES_BACKUP_TARGETS;
+type BackupFailurePhase = "public_key" | "configuration" | "source_identity" | "destination";
 
 export class PostgresBackupError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "PostgresBackupError"; }
+  constructor(readonly code: string, readonly phase?: BackupFailurePhase) { super(code); this.name = "PostgresBackupError"; }
 }
 export function requireBackup(condition: unknown, code: string): asserts condition {
   if (!condition) throw new PostgresBackupError(code);
@@ -35,6 +36,16 @@ export function postgresBackupFailureCode(error: unknown): string {
   }
   return "postgres_backup_failed";
 }
+/** Fixed labels only; never derive a log field from a path/provider message. */
+export function postgresBackupFailurePhase(error: unknown): BackupFailurePhase | undefined {
+  if (error instanceof PostgresBackupError && ["public_key", "configuration", "source_identity", "destination"].includes(error.phase ?? "")) return error.phase;
+  const code = postgresBackupFailureCode(error);
+  if (["public_key_file_unreadable", "public_key_file_required", "public_key_file_limit",
+    "invalid_public_key", "rsa_key_too_small_or_invalid"].includes(code)) return "public_key";
+  if (code === "invalid_r2_endpoint") return "configuration";
+  if (code === "r2_destination_bucket_not_found") return "destination";
+  return undefined;
+}
 /** Classify fixed status/name tokens only; never include provider messages or URLs. */
 export function postgresProviderFailure(provider: "render" | "r2", error: unknown, signal?: AbortSignal,
   fallback = `${provider}_request_failed`): PostgresBackupError {
@@ -48,6 +59,8 @@ export function postgresProviderFailure(provider: "render" | "r2", error: unknow
   if (provider === "render" && status === 403) return new PostgresBackupError("render_authorization_failed");
   if (provider === "r2" && (status === 401 || status === 403
     || candidate?.name === "AccessDenied" || candidate?.Code === "AccessDenied")) return new PostgresBackupError("r2_permission_denied");
+  if (provider === "r2" && (candidate?.name === "NoSuchBucket" || candidate?.Code === "NoSuchBucket"))
+    return new PostgresBackupError("r2_destination_bucket_not_found");
   if (status === 429 || candidate?.name === "SlowDown") return new PostgresBackupError(`${provider}_rate_limited`);
   if (typeof status === "number" && status >= 500 && status <= 599) return new PostgresBackupError(`${provider}_server_error`);
   return new PostgresBackupError(fallback);
@@ -99,7 +112,9 @@ export async function digestArchive(file: string, maximum: number, signal?: Abor
 }
 export function backupKeyId(publicKeyPem: string): string {
   requireBackup(publicKeyPem.trimStart().startsWith("-----BEGIN PUBLIC KEY-----") && !publicKeyPem.includes("PRIVATE KEY"), "public_key_file_required");
-  const key = createPublicKey(publicKeyPem);
+  let key: ReturnType<typeof createPublicKey>;
+  try { key = createPublicKey(publicKeyPem); }
+  catch { throw new PostgresBackupError("invalid_public_key"); }
   requireBackup(key.asymmetricKeyType === "rsa" && (key.asymmetricKeyDetails?.modulusLength ?? 0) >= 3072, "rsa_key_too_small_or_invalid");
   return createHash("sha256").update(key.export({ type: "spki", format: "der" })).digest("hex");
 }

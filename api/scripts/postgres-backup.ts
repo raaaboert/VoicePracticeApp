@@ -2,7 +2,7 @@ import path from "node:path";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { checkIndependentPostgresBackup, createIndependentBackupStorage, createRenderBackupSource, dryRunIndependentPostgresBackup, loadPostgresBackupConfig, runIndependentPostgresBackup, type BackupManifest } from "../src/services/postgresBackup.js";
-import { assertScratchRestoreTarget, decryptBackup, PostgresBackupError, postgresBackupFailureCode, requireBackup } from "../src/services/postgresBackupArchive.js";
+import { assertScratchRestoreTarget, decryptBackup, PostgresBackupError, postgresBackupFailureCode, postgresBackupFailurePhase, requireBackup } from "../src/services/postgresBackupArchive.js";
 
 export function parsePostgresBackupArgs(args: string[]): { mode: "run" | "check" | "verify" | "decrypt" | "dry-run"; target: string; archive?: string; manifest?: string; output?: string } {
   const values: Record<string, string> = {};
@@ -80,6 +80,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   postgresBackupMain(process.argv.slice(2), process.env, cancellation.signal).then(report => console.log(JSON.stringify(report))).catch(error => {
     // Provider errors may embed signed URLs, credentials, paths or data. Never print them.
     const code = postgresBackupFailureCode(error);
-    console.error(JSON.stringify({ outcome: "failed", code })); process.exitCode = 1;
+    const phase = postgresBackupFailurePhase(error);
+    console.error(JSON.stringify({ outcome: "failed", code, ...(phase ? { phase } : {}) })); process.exitCode = 1;
   }).finally(() => { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); });
 }

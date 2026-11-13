@@ -75,6 +75,33 @@ test("CLI failure exits nonzero without echoing credential-like values or provid
   assert.equal(JSON.parse(result.stderr.trim()).code, "production_backup_authorization_required");
 });
 
+test("CLI emits only fixed codes/phases for public-file, PEM and endpoint failures", async t => {
+  const directory = await privateBackupDirectory(); t.after(() => removeBackupDirectory(directory));
+  const malformed = path.join(directory, "synthetic-secret-public.pem");
+  await writeFile(malformed, "-----BEGIN PUBLIC KEY-----\nsynthetic-secret-invalid-pem\n-----END PUBLIC KEY-----");
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["SystemRoot", "PATH", "TEMP", "TMP", "ComSpec", "PATHEXT", "NODE_OPTIONS"]) if (process.env[key]) env[key] = process.env[key];
+  Object.assign(env, { PERITIO_ENV: "production", TSX_DISABLE_CACHE: "1",
+    PG_BACKUP_RENDER_POSTGRES_ID: "dpg-p1234567890123456789-a", PG_BACKUP_RENDER_OWNER_ID: "tea-synthetic",
+    PG_BACKUP_PRODUCTION_AUTHORIZATION: "production:dpg-p1234567890123456789-a",
+    PG_BACKUP_PRODUCTION_RENDER_API_KEY: "synthetic-secret-render", PG_BACKUP_R2_ACCOUNT_ID: "a".repeat(32),
+    PG_BACKUP_R2_ENDPOINT: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`, PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-production",
+    PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID: "synthetic-secret-id", PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY: "synthetic-secret-key",
+    PG_BACKUP_DOWNLOAD_HOSTS: "exports.example.com", PG_BACKUP_PRODUCTION_PUBLIC_KEY_FILE: malformed });
+  for (const [changes, code, phase] of [
+    [{ PG_BACKUP_PRODUCTION_PUBLIC_KEY_FILE: path.join(directory, "synthetic-secret-missing.pem") }, "public_key_file_unreadable", "public_key"],
+    [{}, "invalid_public_key", "public_key"],
+    [{ PG_BACKUP_R2_ENDPOINT: "https://bad host/?token=synthetic-secret" }, "invalid_r2_endpoint", "configuration"],
+  ] as const) {
+    const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./postgres-backup.ts", import.meta.url)), "--dry-run", "--target", "production"],
+      { env: { ...env, ...changes }, encoding: "utf8", timeout: 10000 });
+    assert.equal(result.status, 1); assert.equal(result.stdout, "");
+    assert.deepEqual(JSON.parse(result.stderr.trim()), { outcome: "failed", code, phase });
+    for (const sensitive of ["synthetic-secret", "BEGIN PUBLIC", directory, "https://", "Error:", " at "])
+      assert.equal(result.stderr.includes(sensitive), false, "diagnostic leaked raw detail");
+  }
+});
+
 test("production CLI modes reject cross-environment context and missing authorization before provider access", async () => {
   for (const mode of ["run", "check", "verify", "dry-run"]) {
     await assert.rejects(postgresBackupMain([`--${mode}`, "--target", "production"], { PERITIO_ENV: "staging" }), /backup_target_environment_mismatch/);
