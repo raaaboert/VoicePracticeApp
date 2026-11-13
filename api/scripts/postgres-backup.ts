@@ -1,15 +1,15 @@
 import path from "node:path";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { checkIndependentPostgresBackup, createIndependentBackupStorage, createRenderBackupSource, loadPostgresBackupConfig, runIndependentPostgresBackup, type BackupManifest } from "../src/services/postgresBackup.js";
+import { checkIndependentPostgresBackup, createIndependentBackupStorage, createRenderBackupSource, dryRunIndependentPostgresBackup, loadPostgresBackupConfig, runIndependentPostgresBackup, type BackupManifest } from "../src/services/postgresBackup.js";
 import { assertScratchRestoreTarget, decryptBackup, PostgresBackupError, postgresBackupFailureCode, requireBackup } from "../src/services/postgresBackupArchive.js";
 
-export function parsePostgresBackupArgs(args: string[]): { mode: "run" | "check" | "verify" | "decrypt"; target: string; archive?: string; manifest?: string; output?: string } {
+export function parsePostgresBackupArgs(args: string[]): { mode: "run" | "check" | "verify" | "decrypt" | "dry-run"; target: string; archive?: string; manifest?: string; output?: string } {
   const values: Record<string, string> = {};
   const modes: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const flag = args[i]!;
-    if (["--run", "--check", "--verify", "--decrypt"].includes(flag)) modes.push(flag.slice(2));
+    if (["--run", "--check", "--verify", "--decrypt", "--dry-run"].includes(flag)) modes.push(flag.slice(2));
     else {
       requireBackup(["--target", "--archive", "--manifest", "--output"].includes(flag)
         && !values[flag] && args[i + 1] && !args[i + 1]!.startsWith("--"), "invalid_backup_arguments");
@@ -17,8 +17,9 @@ export function parsePostgresBackupArgs(args: string[]): { mode: "run" | "check"
     }
   }
   requireBackup(modes.length === 1 && values["--target"], "explicit_backup_mode_and_target_required");
-  const mode = modes[0] as "run" | "check" | "verify" | "decrypt";
-  requireBackup(mode === "decrypt" ? values["--target"] === "scratch" : values["--target"] === "staging", "invalid_backup_target");
+  const mode = modes[0] as "run" | "check" | "verify" | "decrypt" | "dry-run";
+  requireBackup(mode === "decrypt" ? values["--target"] === "scratch"
+    : values["--target"] === "staging" || values["--target"] === "production", "invalid_backup_target");
   if (mode === "decrypt") requireBackup(values["--archive"] && values["--manifest"] && values["--output"], "restore_files_required");
   else requireBackup(!values["--archive"] && !values["--manifest"] && !values["--output"], "invalid_backup_arguments");
   return { mode, target: values["--target"]!, archive: values["--archive"], manifest: values["--manifest"], output: values["--output"] };
@@ -49,14 +50,24 @@ export async function postgresBackupMain(args: string[], env: NodeJS.ProcessEnv 
     try { manifest = JSON.parse(await readFile(manifestFile, "utf8")) as BackupManifest; }
     catch { throw new PostgresBackupError("invalid_backup_manifest"); }
     requireBackup(manifest && typeof manifest === "object" && manifest.format === "peritio-postgres-complete-v1" && manifest.header && typeof manifest.header === "object", "invalid_backup_manifest");
+    // Staging recovery remains backward compatible. Production recovery requires
+    // an independently supplied source identity, even though the destination is local.
+    const expectedEnvironment = env.PG_BACKUP_RESTORE_ENVIRONMENT ?? "staging";
+    requireBackup((expectedEnvironment === "staging" || expectedEnvironment === "production")
+      && manifest.header.environment === expectedEnvironment, "restore_source_environment_mismatch");
+    const expectedId = env.PG_BACKUP_RESTORE_POSTGRES_ID;
+    requireBackup(expectedEnvironment !== "production" || expectedId, "restore_source_identity_required");
+    if (expectedId) requireBackup(manifest.header.postgresId === expectedId, "restore_source_identity_mismatch");
     const deadline = AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(900_000)]);
     const header = await decryptBackup(archive, output, await readFile(keyFile, "utf8"), manifest, target, { signal: deadline });
-    return { outcome: "decrypted_and_archive_validated", target: "scratch", databaseRestoreExecuted: false, postgresVersion: header.postgresVersion };
+    return { outcome: "decrypted_and_archive_validated", target: "scratch", sourceEnvironment: header.environment,
+      databaseRestoreExecuted: false, postgresVersion: header.postgresVersion };
   }
   const config = loadPostgresBackupConfig(parsed.target, env);
   const storage = createIndependentBackupStorage(config);
   try {
     const deadline = AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(parsed.mode === "run" ? 900_000 : 300_000)]);
+    if (parsed.mode === "dry-run") return { ...await dryRunIndependentPostgresBackup(config, { storage, source: createRenderBackupSource(config) }, deadline) };
     if (parsed.mode === "run") return { ...await runIndependentPostgresBackup(config, { storage, source: createRenderBackupSource(config) }, deadline) };
     return { ...await checkIndependentPostgresBackup(config, storage, parsed.mode === "verify", new Date(), deadline) };
   } finally { storage.close(); }

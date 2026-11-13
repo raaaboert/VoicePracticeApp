@@ -1,6 +1,8 @@
-# A2.2 independent PostgreSQL backups — staging implementation
+# Independent PostgreSQL backups — staging and explicit production mode
 
-Status: local implementation, not activated. No hosted export/download, R2 change,
+Production parity is implemented for staging delivery; no production resources are configured by this work. The owner reports the earlier staging system was reviewed and restore-tested. The initial A2.2 checkpoint below is historical. Final release policy and staging-finalization checks are recorded at the end of this guide.
+
+Initial A2.2 status: local implementation, not activated. No hosted export/download, R2 change,
 schedule, restore or production operation was performed. Six prior reports are
 preserved. Source baseline: staging `1bf27f24ffffef6742d1465771aebe251b34dba9`.
 The owner confirms both paid databases have 3-day PITR and logical exports, and
@@ -40,10 +42,7 @@ replication.
 
 ## Implemented behavior and boundaries
 
-- Every network mode requires `--target staging`, `PERITIO_ENV=staging`, a specific
-  Render database/owner ID and the dedicated bucket `peritio-postgres-backups-staging`.
-  New export creation additionally verifies instance name, owner, ID, availability
-  and databaseName **voicepractice_db**. Production is intentionally unsupported.
+- Every network mode requires an explicit `--target staging` or `--target production`, matching `PERITIO_ENV`, a specific Render database/owner ID and its dedicated bucket. Staging retains `voicepractice_db` / `peritio-postgres-backups-staging`; production is bound to `peritio-db-prod` / `peritio_db_prod` / `peritio-postgres-backups-production`. These names follow the existing staging/production runbook; an unexpected provider rename fails and must be reviewed, never guessed. Production additionally requires ID-bound confirmation and separate credential variables (see production setup below). New exports validate actual instance name, owner, ID, databaseName and availability before requesting an export.
   Render ID validation follows the [official CLI validator](https://github.com/render-oss/cli/blob/main/pkg/validate/id.go):
   `dpg-` plus 20 lowercase alphanumeric characters and an optional lowercase-letter
   suffix, such as synthetic `dpg-c1234567890123456789-a`. Do not strip the suffix.
@@ -103,11 +102,11 @@ replication.
 
 A fabricated archive created with only the public encryption key can pass
 decryption and integrity checks. This is expected, and no signature verifier is
-implemented here. Before production automation, the owner must explicitly decide
-whether to add archive/manifest signing and how to establish trust in its verifier,
-or document acceptance of unsigned archives with independently trusted provenance.
-Do not claim Peritio producer authenticity without that evidence. No signing system
-or second storage provider is added by this correction batch.
+implemented here. The selected recommendation for this release is unsigned
+archives with the access, immutability and independent provenance controls in
+the final policy below. This does not establish cryptographic producer identity.
+Those operational controls must be established before production activation.
+No signing system or second storage provider is added by this correction batch.
 
 ### Retention and monitoring
 
@@ -119,7 +118,7 @@ variable alone does not change physical retention. Keep lifecycle and lock value
 aligned; do not shorten retention below business/legal requirements.
 
 A bucket lock is an operational security recommendation, not a runtime prerequisite
-for staging `--run`, `--check` or `--verify`. The code does not query or require a
+for either environment's `--run`, `--check` or `--verify`. The code does not query or require a
 lock setting; it uses create-only conditional writes and read-back validation.
 Those safeguards do not prevent a credential holder from deleting objects outside
 this tool. Lifecycle expiry alone does not provide protection against early deletion;
@@ -128,7 +127,7 @@ the recommended minimum lock remains a separate owner configuration control.
 `--check` reads completion metadata and HEADs the latest archive. `--verify` also
 downloads and hashes that encrypted archive and compares its header with the
 manifest. Both fail for missing, stale, expired, malformed or inconsistent backups.
-Only completed slots count. Default maximum age is 36 hours (accepted range 25–144),
+Only completed slots count. Default maximum age is 36 hours (staging range 25–144; production range 25–48),
 measured from export creation, not a later retry/completion. Use 144 for the five-day
 staging schedule on both the job and its independent checker. Exactly 144 hours is
 accepted; any older export fails freshness validation. This threshold affects
@@ -379,7 +378,7 @@ replace the example paths below consistently with that local directory.
    example UTC day and private local directory. The directory must not exist yet:
 
    ```bash
-   node --import tsx --input-type=module - 2026-11-04 /private/peritio-rehearsal <<'NODE'
+   node --import tsx --input-type=module - staging 2026-11-04 /private/peritio-rehearsal <<'NODE'
    import { mkdir, readFile } from 'node:fs/promises';
    import path from 'node:path';
    import { backupPrefix, createIndependentBackupStorage, loadPostgresBackupConfig,
@@ -387,11 +386,11 @@ replace the example paths below consistently with that local directory.
    import { digestArchive, requireBackup } from './api/src/services/postgresBackupArchive.ts';
    let storage;
    try {
-     const [day, destination] = process.argv.slice(2);
+     const [environment, day, destination] = process.argv.slice(2);
      requireBackup(/^\d{4}-\d{2}-\d{2}$/.test(day ?? '') && destination, 'invalid_download_arguments');
      const directory = path.resolve(destination), relative = path.relative(process.cwd(), directory);
      requireBackup(relative.startsWith('..' + path.sep) || path.isAbsolute(relative), 'outside_repository_required');
-     const config = loadPostgresBackupConfig('staging');
+     const config = loadPostgresBackupConfig(environment);
      storage = createIndependentBackupStorage(config);
      await mkdir(directory, { mode: 0o700 });
      const prefix = backupPrefix(config) + day + '/';
@@ -570,8 +569,8 @@ replace the example paths below consistently with that local directory.
 
 | Finding | Disposition |
 | --- | --- |
-| F2 — transient retry/backoff and polling redesign | **Required before production automation.** Existing bounded polling/ambiguous-POST behavior remains; no general transient retry or backoff is added. |
-| Archive signing / F4 producer trust | **Explicit owner decision required before production automation.** Decide signing and verification-key trust, or record acceptance of unsigned artifacts with independently trusted provenance. No signing system added. |
+| F2 — transient retry/backoff and polling redesign | **Release recommendation resolved:** retain bounded fail-fast transport behavior and existing export polling, with tested failure/freshness alerts and one supervised same-day rerun after a transient failure. No automatic POST retry or general backoff loop. Required operational controls are listed below; activation is not claimed. |
+| Archive signing / F4 producer trust | **Release recommendation resolved:** unsigned encrypted archives with restricted identities, immutable retention and independently preserved run/digest/source provenance. No cryptographic producer-authenticity claim or signing infrastructure. Required operational controls are listed below; activation is not claimed. |
 | F5 — maintenance-scheduled status handling | Deferred; current availability check remains unchanged. |
 | F7 — larger archive transfer budgets | Deferred; current size and request/job budgets remain. |
 | F8 — monitoring schedule tuning | Deferred; example schedules and owner setup remain examples, not activated controls. |
@@ -594,9 +593,7 @@ a real isolated restore rehearsal remain separate, explicitly authorized tasks.
   consume Render outbound bandwidth. Check the workspace's remaining allowance.
 - Existing GitHub Actions capacity can provide the independent freshness check
   without a new monitoring subscription, subject to the owner's actual quota.
-- Production activation is a separate reviewed batch: this implementation refuses
-  production, and creates no production job/configuration. No SQL migration is
-  needed. Do not copy staging credentials or keys into production.
+- Production activation remains an owner operation after independent review: explicit production mode is now implemented, but this work creates no production job/configuration. No SQL migration is needed. Never copy staging credentials or keys into production.
 - Cloudflare account loss still affects this same-account archive and media lanes.
   Recovery keys and source/configuration access must survive either provider loss.
 - Owner must configure identities/permissions, private bucket/lifecycle/lock, public
@@ -642,3 +639,119 @@ All runs block dotenv, sockets and fetch; only synthetic files/keys and mocked
 provider responses are used. No hosted backup, restore, cron, bucket configuration,
 signing implementation or production operation was run. Native Linux/Render
 integration and a real restore remain separate tasks.
+
+## Production parity: exact owner activation procedure
+
+Implementation date: November 13, 2026. This extends the same exporter, encryption/container format, immutable R2 writer, verification and isolated local recovery tools; it is not a second backup architecture. Application startup, SQL migrations, hosted services and all existing retention policies are unchanged. Staging keeps its current credentials, bucket, `0 9 */5 * *` schedule and 144-hour freshness threshold.
+
+### Environment separation and limits
+
+- Production network operations require `--target production`, `PERITIO_ENV=production` and `PG_BACKUP_PRODUCTION_AUTHORIZATION=production:<exact-production-dpg-id>`. There is no default target and no production fallback. This is an operator confirmation tied to a particular resource, not a replacement for provider permissions.
+- Common identity settings must identify only production. Actual Render metadata must match configured resource ID, workspace/owner, display name **peritio-db-prod**, SQL database **peritio_db_prod** and available PostgreSQL 11-18 before a new export. Staging remains bound to **voicepractice_db**. A copied staging ID in production configuration fails the actual source metadata check before export/upload. Repository names are pins, not proof of current hosted values; the owner confirms them in Render before activation.
+- Exact destination is **peritio-postgres-backups-production**, with `postgres/production/<production-dpg-id>/<UTC-day>/archive.pgbak` and `complete.json`. Staging and media bucket names are rejected in production. Completion headers must match environment, SQL name, source ID and day. Cross-environment retained objects fail closed instead of completing a wrong slot.
+- Production reads ONLY the production-prefixed credential/public-key variables listed below. Nonempty staging-family credential variables in a production job, and production-family variables in a staging job, are rejected. Never attach shared application/staging environment groups. Variable-family isolation cannot prove a provider token is narrowly scoped or detect an operator placing the same token in both families: distinct principals/tokens, bucket restrictions and owner verification remain necessary.
+- There is **no direct PostgreSQL connection**: no `DATABASE_URL`, SQL login, pool or pg_dump process is added. The separate source is the production Render export resource and its dedicated API credential. All network operations retain their existing deadlines, size limits, read-back checks and client closure. The tool has no deletion/overwrite or bucket-policy operation.
+- `--dry-run` performs source-identity GET, local public-key validation and destination List only. It does not request/list/download exports or write any remote object. Success does not prove PUT permission, sufficient disk for a real export, retention configuration, GCM restore or actual database restore. `--check` and `--verify` remain read-only and need no Render API token/public key.
+- Production freshness defaults to 36 hours, allowed 25-48. Copying the staging value 144 into production is rejected. Staging's default/range and exact 144-hour boundary are preserved. Retention remains default 30 days (existing 7-90 range) with no policy changes.
+
+### Required external resources (not created here)
+
+1. Confirm the existing paid production PostgreSQL resource **peritio-db-prod**, SQL name **peritio_db_prod**, its exact `dpg-...` ID, owner/workspace ID, export permission and privately verified signed-download hostname. Do not create a second production database just for this job.
+2. Create a **new private R2 Standard bucket `peritio-postgres-backups-production`**, with public/r2.dev/custom-domain access disabled. It is separate from `peritio-training-content-backup-production` and from staging. Retain the existing 30-day policy intent for this new lane; the owner must approve/configure its lifecycle and recommended minimum lock together. Do not change any existing bucket policy. A lock is not required by the code; without a lock, a broad Read & Write token may delete data outside this tool.
+3. Issue a new production-bucket-only writer token and a separate production-bucket-only read token for the independent monitor/operator. Required writer operations: List/Head/Get/Put. Do not grant bucket administration or staging/media access. Provider Object Read & Write permissions may include Delete; document and mitigate that actual capability with the new bucket lock. Use a dedicated production Render API principal/token with the narrowest available access; do not assume endpoint/resource scoping is available on the current account.
+4. Generate a **separate production RSA-4096 pair locally**, outside Git and synchronized folders, using the existing key-generation procedure with a distinct `peritio-postgres-production-recovery` directory. Verify encrypted escrow and independent recovery of the private key before activation. Keep it only in the owner vault/offline escrow; upload only the SPKI public PEM as the Render secret file **`postgres-production-public.pem`**. No key is generated or accessed by this implementation.
+
+### Exact Render Cron Job settings
+
+Do not create/deploy the job until this reviewed patch is committed and separately promoted to main, and the required activation controls below are established. Creating the job enables future scheduled exports.
+
+| Setting | Value |
+| --- | --- |
+| Name | `peritio-postgres-backup-production` |
+| Repository | Existing Peritio Git repository |
+| Branch | `main`, after this patch is separately approved/promoted |
+| Runtime | Node; `NODE_VERSION=24.22.2` |
+| Root Directory | Blank (repository root) |
+| Region | Same as the production database |
+| Build Command | `tar --version && npm ci --include=dev` |
+| Command | `npm run backup:postgres -- --target production --run` |
+| Schedule | `0 9 * * *` (daily 09:00 UTC) |
+| Compute | Start with smallest available Cron compute; measure actual runtime/RSS/free disk (roughly 3x export cap) |
+| Persistent disk | None |
+| Notifications | Only failure notifications, delivered to the owner and tested |
+| Environment groups | None shared with application, media, staging or recovery-private-key settings |
+
+No API build is needed for this TSX CLI. Keeping the already-working `npm install --include=dev && npm run build:api` build command is also compatible but performs additional unrelated API/native checks. Required backup runtime tools are Node, installed dependencies and `tar`; pg_dump/pg_restore are not required on the Cron host.
+
+Configure these exact names on the production job. These are new owner settings, not existing secret values inspected here:
+
+| Name | Value/source and placement |
+| --- | --- |
+| `NODE_VERSION` | Environment variable: `24.22.2` |
+| `PERITIO_ENV` | Environment variable: `production` |
+| `PG_BACKUP_PRODUCTION_AUTHORIZATION` | Nonsecret environment variable: `production:<exact-production-dpg-id>` |
+| `PG_BACKUP_RENDER_POSTGRES_ID` | Nonsecret environment variable: exact production resource ID from Render |
+| `PG_BACKUP_RENDER_OWNER_ID` | Nonsecret environment variable: exact production owner/workspace ID |
+| `PG_BACKUP_RENDER_DATABASE_NAME` | Environment variable: `peritio-db-prod` (also the production default) |
+| `PG_BACKUP_PRODUCTION_RENDER_API_KEY` | Secret environment variable: dedicated production Render API token |
+| `PG_BACKUP_DOWNLOAD_HOSTS` | Environment variable: privately verified production export HTTPS hostname(s), never a signed URL |
+| `PG_BACKUP_R2_ACCOUNT_ID` | Nonsecret environment variable: account containing the new PostgreSQL bucket |
+| `PG_BACKUP_R2_ENDPOINT` | Environment variable: `https://<account-id>.r2.cloudflarestorage.com` |
+| `PG_BACKUP_R2_BUCKET` | Environment variable: `peritio-postgres-backups-production` |
+| `PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID` | Secret environment variable: dedicated production bucket writer access ID |
+| `PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY` | Secret environment variable: matching production bucket writer secret |
+| `PG_BACKUP_PRODUCTION_PUBLIC_KEY_FILE` | Environment variable: `/etc/secrets/postgres-production-public.pem`; contents supplied as the **public-only Render secret file** above |
+| `PG_BACKUP_RETENTION_DAYS` | Environment variable: `30`; does not install/change lifecycle or locks |
+| `PG_BACKUP_MAX_AGE_HOURS` | Environment variable: `36`; also configure 36 on independent monitor |
+| `PG_BACKUP_MAX_BYTES` | Environment variable: `536870912` initially (512 MiB); review size/15-minute budget if actual export exceeds it |
+
+`RENDER_GIT_COMMIT` is optional platform-provided revision evidence, not another secret to create. Do not supply canonical staging variables `PG_BACKUP_RENDER_API_KEY`, `PG_BACKUP_R2_ACCESS_KEY_ID`, `PG_BACKUP_R2_SECRET_ACCESS_KEY` or `PG_BACKUP_PUBLIC_KEY_FILE` to production. Do not supply private-key, `DATABASE_URL`, OpenAI/email/application auth or media-storage settings.
+
+### Freshness monitoring and final release policy
+
+Use the existing independent-check workflow template in this guide with checkout ref **main**, target **production**, `PERITIO_ENV=production`, production ID/owner/confirmation and production bucket/account/endpoint. Replace the R2 variables with **`PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID` / `PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY`**, populated from the separate read-only token, and set `PG_BACKUP_MAX_AGE_HOURS=36`. Schedule every six hours (`0 */6 * * *`); command **`npm run backup:postgres -- --target production --check`**. No Render API token, public key or private key belongs in the monitor. The staging monitor/template remains unchanged with staging-only read credentials and 144 hours. GitHub schedules require an owner-configured workflow on the default branch, Actions availability and tested failure notifications; this work does not create/activate one. Test empty-bucket check failure/notification before the first archive, then demonstrate healthy status after it.
+
+**Selected recommendation at the owner's staging-finalization request:** retain fail-fast transport behavior and unsigned encrypted archives, subject to the following concrete production controls. This resolves the release design recommendations; it does not claim that the controls are configured, notifications are delivered, or production recovery is proven. No executable change is required.
+
+**Failure/retry policy.** Retain the current 15-minute run deadline, bounded export polling (at most 60 polls), per-request/transfer deadlines and fixed nonzero failure codes. There is no general automatic transport retry. Never automatically repeat an ambiguous Render export POST: Render might already have accepted it, and starting another export adds database/provider work without guaranteeing recovery. Create-only R2 slots and verified same-day reuse remain unchanged; they prevent replacement of a completed archive, not all possible duplicate provider exports.
+
+Enable and test Render failure notifications before scheduling the writer. On a transient timeout, rate limit, network failure or provider 5xx, the owner checks provider health and the safe error code, waits 10-15 minutes and performs **at most one supervised same-UTC-day rerun** using the unchanged `--run` command. If it fails again, escalate and investigate rather than starting a retry loop or waiting silently for tomorrow. Authentication, environment/identity, checksum, encryption or retention failures require investigation/correction before a rerun; never delete a slot or remove locks to make it pass. The independent six-hour `--check` with a 36-hour threshold is mandatory for production: a stopped writer may not alert through Render itself. Nominal stale detection is within six hours after the threshold (up to about 42 hours since export, plus scheduler/notification delays), not a 36-hour delivery guarantee. Assign the owner to receive/respond to alerts and test both a deliberately failing read-only check on an empty backup bucket and recovery to healthy status.
+
+**Unsigned-provenance policy.** Keep AES-GCM/RSA encryption, ciphertext hash/read-back verification and the existing format; do not introduce a signing service or another online private key. Use distinct narrowly restricted Render/R2 principals, separate read-only monitoring credentials, MFA on operator accounts, and a private dedicated production bucket. For this unsigned-production recommendation, establish the new bucket's minimum 30-day retention lock before the first archive, with its owner-approved lifecycle aligned to the existing 30-day retention intent. This is an activation control; the code does not enforce/query the lock and no existing bucket policy is changed by this release.
+
+After an authorized successful run and `--verify`, independently preserve the run/deployed-revision evidence, source/export identity and creation time, key fingerprint, ciphertext SHA-256/size and UTC slot in the owner's protected recovery record outside the writer's bucket/credential authority (for example, an access-controlled recovery-vault note). Values copied only from a later object in the same potentially compromised bucket are not independent provenance. Validate that record against the matching archive/manifest during the isolated restore, and retain the offline private-key escrow separately. Use provider/run evidence together; a checksum or public-key envelope alone does not identify Peritio as producer.
+
+This is the smallest defensible initial approach for the current owner-operated system. A signing key stored in the same compromised job would not solve a compromised-writer threat by itself; independently protected signing would add a new key/trust lifecycle. Residual risk remains: an attacker with writer/principal access can preempt future slots with a fabricated archive, and anyone with the public key can construct a decryptable envelope. Do not silently trust a suspect run or archive. Revisit independently protected signing if stronger adversarial origin proof, multiple untrusted writers or customer/compliance obligations require it. Actual least-privilege permissions, lock/privacy, protected provenance records, tested independent alerts and a real production isolated restore remain activation prerequisites.
+
+### First encrypted production backup and isolated restore (future authorization)
+
+1. After independent review and separate commit/promotion approval, configure only the resources/settings above. Verify source identity, credential isolation, public-key fingerprint/escrow, bucket privacy/retention and export host privately. Do not attach the private key or a database connection. Authorize the first export before enabling a scheduled writer.
+2. From the configured owner-authorized job environment, run **`npm run backup:postgres -- --target production --dry-run`**. Require `outcome=dry_run_validated`, `environment=production`, all three validation booleans true and `mutationsPerformed=false`. It succeeds against an empty bucket. On any mismatch, correct configuration after checking the intended resource; never weaken the guards.
+3. Authorize/run **`npm run backup:postgres -- --target production --run`** once. Require `outcome=archived`, `environment=production` and positive bytes, with one `archive.pgbak` and final `complete.json` under that UTC-day production prefix. Same-day rerun should return `already_complete`; do not delete/replace an existing slot to force a new export.
+4. Run **`npm run backup:postgres -- --target production --check`**, then **`npm run backup:postgres -- --target production --verify`**. Require `healthy`, age <=36 hours, and `checksumVerified=true` for verify. Record only aggregate outcome/time/bytes and the independently trusted expected digest/source/key identity in the protected owner recovery record, not general logs. Check that the independent monitor/notifications work even when the writer schedule stops.
+5. With read-only production R2 credentials, use the existing bounded downloader example above, changing its first positional argument from `staging` to **`production`**, the UTC day to the chosen completed slot, and the local destination to a new dedicated encrypted, non-synchronized directory outside Git. It loads only the production config and validates manifest/header/checksum. Alternatively privately download the exact archive/manifest pair in Cloudflare. Preserve both encrypted originals.
+6. Recover the matching **production** private key locally from escrow, never to Render/R2. In that isolated local process set `PERITIO_ENV=development`, `PG_BACKUP_RESTORE_ENVIRONMENT=production`, `PG_BACKUP_RESTORE_POSTGRES_ID=<independently recorded production dpg-id>`, `PG_BACKUP_PRIVATE_KEY_FILE=<local private.pem path>` and `PG_BACKUP_RESTORE_URL=postgresql://127.0.0.1:55432/peritio_restore_a22`. Then run from the repository root (actual downloaded filenames are supported):
+
+   ```sh
+   npm run backup:postgres -- --target scratch --decrypt --archive /private/peritio-production-rehearsal/archive.pgbak --manifest /private/peritio-production-rehearsal/complete.json --output /private/peritio-production-rehearsal/export.dir.tar.gz
+   ```
+
+   All paths are placeholders replaced with the protected actual local paths. No secret value appears in the command. The CLI refuses hosted mode, non-loopback destinations and wrong source environment/ID before decryption. GCM/header/digest/tar checks precede atomic, create-only plaintext publication. The restore URL remains a **nonconnecting guard**, not proof of an empty database.
+7. Use the existing isolated restore/disposal procedure above in a **new** disposable container/cluster, never any existing DB. Choose PostgreSQL 18 (or a compatible pg_restore major supported by the actual archive TOC); use container-internal Unix socket/no published port, or the previously validated new local cluster exclusively at `127.0.0.1:55432` with verified PID/data-directory identity. For the container procedure, replace `postgres:17` with `postgres:18`; keep all name-existence checks and scope cleanup to the container actually created. Run `pg_restore --no-owner --no-privileges --exit-on-error` into new `peritio_restore_a22`. Require exit 0; SQL READ ONLY checks must verify required tables/constraints, exactly one primary `app_state`, JSONB types/arrays, aggregate users/orgs/sessions/scores/AI usage/content counts and key relationships. No records, passwords or credentials in output; compare same-snapshot evidence, not a later live database. Do not start the application against restored customer data as part of this check.
+8. Capture sanitized evidence; stop only the disposable instance, verify its listener/process is gone, remove only its data and any anonymous volume (`docker rm -f -v peritio-a22-restore` only after verifying it is the newly created rehearsal container). Remove decrypted output, interrupted `.peritio-pg-restore-*` plaintext and working private-key copy from the checked local workspace after success **or failure**. Preserve encrypted originals, manifest, trusted provenance record and all escrow copies. A real production rehearsal is not established by these offline fixture tests.
+
+### Incremental recurring cost estimate
+
+Checked public pricing November 13, 2026: [Render Cron](https://render.com/docs/cronjobs) has a **$1/month minimum per job**, otherwise billed for active compute time. [R2 Standard](https://developers.cloudflare.com/r2/pricing/) is **$0.015/GB-month**, with account-shared 10 GB-month storage and request allowances and free direct egress. Daily 30-day retention uses roughly `30 * D` GB for average encrypted archive size D GB. At the initial 512 MiB export ceiling, this is about 16.1 GB (roughly $0.24 storage before free allowances/rounding), plus small request usage. Allow roughly **$1-5/month for a small backup job and storage**, as an unmeasured planning estimate, not a quote/cap. Render outbound bandwidth, actual job plan/runtime, account-wide free allowances, build usage and independent monitor quotas can change the bill. No second paid database or always-on monitoring service is required; local disposable restore adds no ongoing cloud database charge. Owner operations/recovery time is additional. No paid resource was created here.
+
+### Local validation and independent review — November 13, 2026
+
+- **54/54 focused offline tests passed**, zero failures/skips, with Node **24.22.2**, synthetic keys/archives and mocked Render/R2. No production credential, database, export, bucket or real restore was accessed. Tests include explicit authorization/credential-family guards, cross-wired source identities, cross-environment retained objects, production archive/check/verify/decrypt, unchanged staging 144-hour behavior, read-only dry-run, cleanup/error handling and source-pinned offline recovery.
+- API TypeScript and separate CLI/test TypeScript no-emit checks passed. `git diff --check` passed. No package/dependency, migration, application startup or broad regression changes were needed.
+- One separate Codex review agent independently inspected the eight-file diff and relevant unchanged encryption/storage paths, reran **54/54** offline tests and checked whitespace. Verdict: **PASS WITH MINOR FINDINGS; no new implementation blocker**. This is an independent agent review, not a claim of another Claude/external-human audit.
+- Both low-severity findings were documentation inconsistencies: the owner-identity row still implied production was always forbidden, and the deferred F2 retry policy was inconsistent across sections. Both were corrected at review. The subsequent staging-finalization request selected the recommendations documented in the final release policy above; no production activation/control validation is presumed.
+- Actual token scopes, identities, bucket privacy/retention, failure notification delivery, independent monitoring and the first production backup/isolated restore remain owner activation requirements. At this review checkpoint the production release on main was untouched and changes were uncommitted; six historical reports retained their recorded hashes.
+
+### Staging finalization
+
+The owner requested the final retry/provenance recommendations and a staging-only commit/push. The policies above are now the recommended production approach; activation remains a later owner operation. Only the setup guide, configuration inventory and recovery runbook were refined in finalization. The five reviewed code/test files are byte-for-byte unchanged, so the existing 54/54 focused test results and API/CLI TypeScript results remain applicable; no test rerun or executable change was needed. Final checks cover the eight-file scope, documentation/code agreement, whitespace, normal staging push ancestry and all six historical report hashes. Main must remain at production release `9e0cdbaf4de82ea98d19dfc325fd141744678f7a`.

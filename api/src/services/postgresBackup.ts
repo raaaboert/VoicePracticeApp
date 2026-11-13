@@ -8,16 +8,18 @@ import {
   backupKeyId, byteLimit, DAY_MS, digestArchive, encryptBackup, PostgresBackupError, postgresProviderFailure,
   privateBackupDirectory, readBackupHeader, removeBackupDirectory, requireBackup, validateRenderArchive,
   type ArchiveDigest, type BackupHeader,
+  POSTGRES_BACKUP_TARGETS, type BackupEnvironment,
 } from "./postgresBackupArchive.js";
 
 export interface PostgresBackupConfig {
-  environment: "staging";
+  environment: BackupEnvironment;
   postgresId: string;
   renderOwnerId: string;
   renderDatabaseName: string;
   renderApiKey: string;
   downloadHosts: string[];
-  bucket: "peritio-postgres-backups-staging";
+  bucket: "peritio-postgres-backups-staging" | "peritio-postgres-backups-production";
+  productionAuthorization?: string;
   endpoint: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -67,15 +69,24 @@ function integer(raw: string | undefined, fallback: number, minimum: number, max
   return result;
 }
 export function loadPostgresBackupConfig(target: string | undefined, env: NodeJS.ProcessEnv = process.env): PostgresBackupConfig {
-  // Production is intentionally unavailable in A2.2, even with production confirmation flags.
-  requireBackup(target === "staging" && env.PERITIO_ENV === "staging", "staging_backup_target_required");
+  requireBackup((target === "staging" || target === "production") && env.PERITIO_ENV === target, "backup_target_environment_mismatch");
+  const profile = POSTGRES_BACKUP_TARGETS[target];
   const postgresId = value(env, "PG_BACKUP_RENDER_POSTGRES_ID");
   const ownerId = value(env, "PG_BACKUP_RENDER_OWNER_ID");
   // Matches Render's official CLI IsPostgresID (primary/replica suffixes included).
   // https://github.com/render-oss/cli/blob/main/pkg/validate/id.go
   requireBackup(/^dpg-[a-z0-9]{20}(?:-[a-z]+)?$/.test(postgresId) && /^(tea|usr)-[a-z0-9]+$/.test(ownerId), "invalid_render_identity");
+  const production = target === "production";
+  const productionAuthorization = env.PG_BACKUP_PRODUCTION_AUTHORIZATION?.trim();
+  requireBackup(production ? productionAuthorization === `production:${postgresId}` : !productionAuthorization,
+    "production_backup_authorization_required");
+  const isolatedNames = ["RENDER_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "PUBLIC_KEY_FILE"];
+  requireBackup(isolatedNames.every(name => !env[`PG_BACKUP_${production ? "" : "PRODUCTION_"}${name}`]?.trim()), "cross_environment_backup_credentials");
+  const credential = (name: string) => `PG_BACKUP_${production ? "PRODUCTION_" : ""}${name}`;
   const bucket = value(env, "PG_BACKUP_R2_BUCKET");
-  requireBackup(bucket === "peritio-postgres-backups-staging", "staging_backup_bucket_required");
+  requireBackup(bucket === profile.bucket, "backup_bucket_environment_mismatch");
+  const renderDatabaseName = env.PG_BACKUP_RENDER_DATABASE_NAME?.trim() || profile.renderName;
+  requireBackup(renderDatabaseName === profile.renderName, "backup_database_environment_mismatch");
   const account = value(env, "PG_BACKUP_R2_ACCOUNT_ID");
   requireBackup(/^[a-f0-9]{32}$/i.test(account), "invalid_r2_account");
   const endpoint = new URL(value(env, "PG_BACKUP_R2_ENDPOINT"));
@@ -84,18 +95,46 @@ export function loadPostgresBackupConfig(target: string | undefined, env: NodeJS
   const hosts = (env.PG_BACKUP_DOWNLOAD_HOSTS ?? "").split(",").map(host => host.trim().toLowerCase()).filter(Boolean);
   requireBackup(hosts.every(host => /^(?=.{1,253}$)[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(host)
     && !/^[\d.]+$/.test(host) && !host.endsWith(".local") && !host.endsWith(".localhost") && !host.endsWith(".internal")), "invalid_export_download_host");
-  return { environment: "staging", postgresId, renderOwnerId: ownerId,
-    renderDatabaseName: env.PG_BACKUP_RENDER_DATABASE_NAME?.trim() || "voicepractice_db",
-    renderApiKey: env.PG_BACKUP_RENDER_API_KEY?.trim() || "", downloadHosts: hosts,
+  return { environment: target, postgresId, renderOwnerId: ownerId, productionAuthorization,
+    renderDatabaseName,
+    renderApiKey: env[credential("RENDER_API_KEY")]?.trim() || "", downloadHosts: hosts,
     bucket, endpoint: endpoint.origin,
-    accessKeyId: value(env, "PG_BACKUP_R2_ACCESS_KEY_ID"), secretAccessKey: value(env, "PG_BACKUP_R2_SECRET_ACCESS_KEY"),
-    publicKeyFile: env.PG_BACKUP_PUBLIC_KEY_FILE?.trim() || "",
+    accessKeyId: value(env, credential("R2_ACCESS_KEY_ID")), secretAccessKey: value(env, credential("R2_SECRET_ACCESS_KEY")),
+    publicKeyFile: env[credential("PUBLIC_KEY_FILE")]?.trim() || "",
     retentionDays: integer(env.PG_BACKUP_RETENTION_DAYS, 30, 7, 90),
-    maxAgeHours: integer(env.PG_BACKUP_MAX_AGE_HOURS, 36, 25, 144),
+    maxAgeHours: integer(env.PG_BACKUP_MAX_AGE_HOURS, 36, 25, production ? 48 : 144),
     maxBytes: integer(env.PG_BACKUP_MAX_BYTES, 536_870_912, 1024, 4_294_967_296),
     toolRevision: /^[a-f0-9]{40}$/i.test(env.RENDER_GIT_COMMIT ?? "") ? env.RENDER_GIT_COMMIT! : "uncommitted_or_unknown" };
 }
-export function backupPrefix(config: PostgresBackupConfig): string { return `postgres/staging/${config.postgresId}/`; }
+export function backupPrefix(config: PostgresBackupConfig): string {
+  const profile = POSTGRES_BACKUP_TARGETS[config.environment];
+  requireBackup(profile && config.bucket === profile.bucket && config.renderDatabaseName === profile.renderName, "backup_identity_mismatch");
+  requireBackup(config.environment !== "production" || config.productionAuthorization === `production:${config.postgresId}`, "production_backup_authorization_required");
+  return `postgres/${config.environment}/${config.postgresId}/`;
+}
+export async function validatePostgresBackupSource(config: PostgresBackupConfig, source: RenderBackupSource, signal: AbortSignal) {
+  backupPrefix(config);
+  const identity = await source.identity(signal);
+  requireBackup(identity.id === config.postgresId && identity.ownerId === config.renderOwnerId
+    && identity.name === config.renderDatabaseName && identity.databaseName === POSTGRES_BACKUP_TARGETS[config.environment].databaseName
+    && identity.available && /^1[1-8]$/.test(identity.version), "render_database_identity_mismatch");
+  return identity;
+}
+/** Configuration/GET/List preflight only. No export request, upload or deletion. */
+export async function dryRunIndependentPostgresBackup(config: PostgresBackupConfig, deps: PostgresBackupDependencies,
+  signal = AbortSignal.timeout(300_000)) {
+  signal.throwIfAborted();
+  const prefix = backupPrefix(config);
+  requireBackup(config.renderApiKey && config.publicKeyFile && config.downloadHosts.length, "export_credentials_or_public_key_missing");
+  requireBackup((await stat(config.publicKeyFile)).size <= 65_536, "public_key_file_limit");
+  backupKeyId(await readFile(config.publicKeyFile, "utf8"));
+  await validatePostgresBackupSource(config, deps.source, signal);
+  const keys = await deps.storage.manifests(prefix, signal);
+  requireBackup(keys.length <= 100, "manifest_list_limit");
+  keys.forEach(key => keyDay(key, config));
+  return { outcome: "dry_run_validated", environment: config.environment, sourceIdentityVerified: true,
+    destinationListVerified: true, encryptionKeyVerified: true, mutationsPerformed: false };
+}
 function timestamp(raw: string): number { const result = Date.parse(raw); requireBackup(Number.isFinite(result), "invalid_backup_timestamp"); return result; }
 function keyDay(key: string, config: PostgresBackupConfig): string {
   const suffix = key.slice(backupPrefix(config).length);
@@ -103,8 +142,8 @@ function keyDay(key: string, config: PostgresBackupConfig): string {
   return suffix.slice(0, 10);
 }
 export function validateBackupHeader(header: BackupHeader, config: PostgresBackupConfig, day: string, now: Date): void {
-  requireBackup(header.format === "peritio-postgres-v1" && header.environment === "staging"
-    && header.databaseName === "voicepractice_db" && header.postgresId === config.postgresId && header.day === day
+  requireBackup(header.format === "peritio-postgres-v1" && header.environment === config.environment
+    && header.databaseName === POSTGRES_BACKUP_TARGETS[config.environment].databaseName && header.postgresId === config.postgresId && header.day === day
     && /^\d{4}-\d{2}-\d{2}$/.test(day) && typeof header.exportId === "string" && header.exportId.length > 0
     && /^1[1-8]$/.test(header.postgresVersion) && /^[a-f0-9]{64}$/.test(header.keyId)
     && Number.isInteger(header.retentionDays) && header.retentionDays >= 7 && header.retentionDays <= 90,
@@ -147,7 +186,7 @@ function assertHead(head: BackupHead | null, expected: ArchiveDigest): void {
 
 /** Per-day immutable artifact + last-written completion. No application/DB initialization. */
 export async function runIndependentPostgresBackup(config: PostgresBackupConfig, deps: PostgresBackupDependencies,
-  signal = AbortSignal.timeout(900_000)): Promise<{ outcome: "archived" | "already_complete"; bytes: number; environment: "staging" }> {
+  signal = AbortSignal.timeout(900_000)): Promise<{ outcome: "archived" | "already_complete"; bytes: number; environment: BackupEnvironment }> {
   signal.throwIfAborted();
   const now = deps.now ?? (() => new Date());
   const started = now(); const day = started.toISOString().slice(0, 10);
@@ -160,16 +199,13 @@ export async function runIndependentPostgresBackup(config: PostgresBackupConfig,
       assertHead(await deps.storage.head(archiveKey, signal), manifest);
       const header = await verifyStoredArchive(deps.storage, archiveKey, path.join(directory, "existing.pgbak"), manifest, config, day, now(), signal);
       requireBackup(JSON.stringify(header) === JSON.stringify(manifest.header), "manifest_header_mismatch");
-      return { outcome: "already_complete", bytes: manifest.bytes, environment: "staging" };
+      return { outcome: "already_complete", bytes: manifest.bytes, environment: config.environment };
     }
     let stored = await deps.storage.head(archiveKey, signal);
     let header: BackupHeader, digest: ArchiveDigest;
     if (!stored) {
       requireBackup(config.renderApiKey && config.publicKeyFile && config.downloadHosts.length, "export_credentials_or_public_key_missing");
-      const identity = await deps.source.identity(signal);
-      requireBackup(identity.id === config.postgresId && identity.ownerId === config.renderOwnerId
-        && identity.name === config.renderDatabaseName && identity.databaseName === "voicepractice_db" && identity.available
-        && /^1[1-8]$/.test(identity.version), "render_database_identity_mismatch");
+      const identity = await validatePostgresBackupSource(config, deps.source, signal);
       const publicKey = await readFile(config.publicKeyFile, "utf8"); backupKeyId(publicKey);
       const select = (exports: RenderExport[]) => {
         requireBackup(exports.length <= 100, "render_export_list_limit");
@@ -199,8 +235,8 @@ export async function runIndependentPostgresBackup(config: PostgresBackupConfig,
       const plain = path.join(directory, "export.dir.tar.gz"), encrypted = path.join(directory, "archive.pgbak");
       await deps.source.download(exported.url, plain, config.maxBytes, signal);
       await (deps.inspectArchive ?? validateRenderArchive)(plain, signal);
-      header = await encryptBackup(plain, encrypted, { format: "peritio-postgres-v1", environment: "staging",
-        postgresId: config.postgresId, databaseName: "voicepractice_db", day, exportId: exported.id,
+      header = await encryptBackup(plain, encrypted, { format: "peritio-postgres-v1", environment: config.environment,
+        postgresId: config.postgresId, databaseName: POSTGRES_BACKUP_TARGETS[config.environment].databaseName, day, exportId: exported.id,
         exportCreatedAt: exported.createdAt, postgresVersion: identity.version, archivedAt: now().toISOString(),
         retentionDays: config.retentionDays, toolRevision: config.toolRevision }, publicKey, signal);
       digest = await digestArchive(encrypted, config.maxBytes + 32_768, signal);
@@ -219,13 +255,13 @@ export async function runIndependentPostgresBackup(config: PostgresBackupConfig,
     const committed = await readManifest(deps.storage, manifestKey, path.join(directory, "committed.json"), config, now(), signal);
     requireBackup(committed.sha256 === digest.sha256 && committed.bytes === digest.bytes
       && JSON.stringify(committed.header) === JSON.stringify(header), "completion_conflict");
-    return { outcome: "archived", bytes: digest.bytes, environment: "staging" };
+    return { outcome: "archived", bytes: digest.bytes, environment: config.environment };
   } finally { await removeBackupDirectory(directory); }
 }
 
 export async function checkIndependentPostgresBackup(config: PostgresBackupConfig, storage: IndependentBackupStorage,
   fullVerification: boolean, now = new Date(), signal = AbortSignal.timeout(300_000)):
-  Promise<{ outcome: "healthy"; environment: "staging"; ageHours: number; bytes: number; checksumVerified: boolean }> {
+  Promise<{ outcome: "healthy"; environment: BackupEnvironment; ageHours: number; bytes: number; checksumVerified: boolean }> {
   const keys = await storage.manifests(backupPrefix(config), signal);
   requireBackup(keys.length <= 100, "manifest_list_limit");
   keys.forEach(key => keyDay(key, config)); keys.sort().reverse();
@@ -242,7 +278,7 @@ export async function checkIndependentPostgresBackup(config: PostgresBackupConfi
       const header = await verifyStoredArchive(storage, archiveKey, path.join(directory, "verified.pgbak"), manifest, config, day, now, signal);
       requireBackup(JSON.stringify(header) === JSON.stringify(manifest.header), "manifest_header_mismatch");
     }
-    return { outcome: "healthy", environment: "staging", ageHours: Math.round(ageHours * 100) / 100,
+    return { outcome: "healthy", environment: config.environment, ageHours: Math.round(ageHours * 100) / 100,
       bytes: manifest.bytes, checksumVerified: fullVerification };
   } finally { await removeBackupDirectory(directory); }
 }
