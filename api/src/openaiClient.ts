@@ -1,6 +1,8 @@
 import type { OpenAiCompletionApiFamily, OpenAiReasoningEffort } from "./openaiModelConfig.js";
 import { safeErrorDiagnostics } from "./services/safeErrors.js";
 import { prepareAiProviderRequest } from "./services/aiProviderDispatch.js";
+import { trustedTranscriptionText } from "./services/transcriptionEvidence.js";
+import { synthesizeRealtimeSpeech, type SpeechUsage } from "./services/realtimeSpeech.js";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 
@@ -252,6 +254,7 @@ function createOpenAiTranscriptionTimeoutError(timeoutMs: number): Error {
 
 export async function requestChatCompletion(params: {
   model: string;
+  reasoningEffort?: OpenAiReasoningEffort | null;
   messages: ChatMessage[];
   temperature?: number;
   topP?: number;
@@ -280,8 +283,17 @@ export async function requestChatCompletion(params: {
     if (typeof params.presencePenalty === "number") {
       body.presence_penalty = params.presencePenalty;
     }
+    if (params.model === "gpt-6-luna") {
+      body.reasoning_effort = params.reasoningEffort ?? "none";
+      if (body.reasoning_effort !== "none") {
+        delete body.temperature;
+        delete body.top_p;
+        delete body.frequency_penalty;
+        delete body.presence_penalty;
+      }
+    }
     if (typeof params.maxTokens === "number") {
-      body.max_tokens = params.maxTokens;
+      body[params.model === "gpt-6-luna" ? "max_completion_tokens" : "max_tokens"] = params.maxTokens;
     }
     return body;
   });
@@ -364,6 +376,7 @@ export async function requestResponsesCompletion(params: {
   correlationId?: string;
 }): Promise<{ text: string; usage: OpenAiTokenUsage; model: string }> {
   const apiKey = getOpenAiApiKey();
+  const reasoningEffort = params.reasoningEffort ?? (params.model === "gpt-6-luna" ? "none" : null);
   const body = prepareAiProviderRequest(() => {
     const body: Record<string, unknown> = {
       model: params.model,
@@ -373,15 +386,15 @@ export async function requestResponsesCompletion(params: {
       }))
     };
 
-    if (typeof params.temperature === "number") {
+    if (typeof params.temperature === "number" && !(params.model === "gpt-6-luna" && reasoningEffort !== "none")) {
       body.temperature = params.temperature;
     }
     if (typeof params.maxOutputTokens === "number") {
       body.max_output_tokens = params.maxOutputTokens;
     }
-    if (params.reasoningEffort) {
+    if (reasoningEffort) {
       body.reasoning = {
-        effort: params.reasoningEffort,
+        effort: reasoningEffort,
       };
     }
     return body;
@@ -490,6 +503,7 @@ export async function requestCompletion(params: {
 
   return requestChatCompletion({
     model: params.model,
+    reasoningEffort: params.reasoningEffort,
     messages: params.messages,
     temperature: params.temperature,
     maxTokens: params.maxOutputTokens,
@@ -505,17 +519,23 @@ export async function requestTranscription(params: {
   fileName: string;
   mimeType: string;
   language?: string;
+  signal?: AbortSignal;
   timeoutMs?: number;
   route?: string;
   correlationId?: string;
 }): Promise<string> {
+  prepareAiProviderRequest(() => params.signal?.throwIfAborted());
   const apiKey = getOpenAiApiKey();
 
   const formData = prepareAiProviderRequest(() => {
     const formData = new FormData();
     formData.append("model", params.model);
+    if (params.model === "whisper-1") formData.append("response_format", "verbose_json");
+    if (params.model === "gpt-transcribe") {
+      formData.append("response_format", "json");
+    }
     if (typeof params.language === "string" && params.language.trim()) {
-      formData.append("language", params.language.trim());
+      formData.append(params.model === "gpt-transcribe" ? "languages[]" : "language", params.language.trim());
     }
 
     const bytes = new Uint8Array(params.audioBuffer);
@@ -533,9 +553,10 @@ export async function requestTranscription(params: {
     fallbackTimeoutMs: DEFAULT_TRANSCRIPTION_REQUEST_TIMEOUT_MS,
     createTimeoutError: createOpenAiTranscriptionTimeoutError,
     operation: async (signal) => {
+      prepareAiProviderRequest(() => params.signal?.throwIfAborted());
       const response = await fetch(`${OPENAI_BASE_URL}/audio/transcriptions`, {
         method: "POST",
-        signal,
+        signal: params.signal ? AbortSignal.any([signal, params.signal]) : signal,
         headers: {
           Authorization: `Bearer ${apiKey}`
         },
@@ -547,7 +568,7 @@ export async function requestTranscription(params: {
       }
 
       const payload = (await response.json()) as TranscriptionResponse;
-      return payload.text?.trim() ?? "";
+      return trustedTranscriptionText(payload);
     }
   });
 }
@@ -560,13 +581,25 @@ export async function requestSpeechSynthesis(params: {
   speed?: number;
   instructions?: string;
   timeoutMs?: number;
-}): Promise<{ audioBuffer: Buffer; contentType: string }> {
+}): Promise<{ audioBuffer: Buffer; contentType: string; usage?: SpeechUsage }> {
   const apiKey = getOpenAiApiKey();
   const responseFormat: SpeechFormat = params.format ?? "mp3";
   const timeoutMs =
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? Math.floor(params.timeoutMs)
       : DEFAULT_SPEECH_REQUEST_TIMEOUT_MS;
+  if (params.model === "gpt-realtime-2.1-mini") {
+    prepareAiProviderRequest(() => {
+      if (responseFormat !== "mp3") throw new Error("Realtime synthesis supports the existing MP3 contract only.");
+    });
+    try {
+      return await synthesizeRealtimeSpeech({ ...params, apiKey, timeoutMs });
+    } catch (error) {
+      throw new OpenAiSpeechRequestError({ errorType: isAbortError(error) ? "timeout" : "speech_generation_failed",
+        errorCode: isAbortError(error) ? "timeout" : "speech_generation_failed",
+        errorMessage: isAbortError(error) ? "OpenAI TTS request timed out." : "OpenAI speech generation failed." });
+    }
+  }
   const body = prepareAiProviderRequest(() => {
     const body: Record<string, unknown> = {
       model: params.model,

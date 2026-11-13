@@ -12,9 +12,9 @@ test("uses the recommended OpenAI defaults", () => {
 
   assert.deepEqual(config, {
     chat: {
-      model: "gpt-4o-mini",
+      model: "gpt-6-luna",
       apiFamily: "chat_completions",
-      reasoningEffort: null,
+      reasoningEffort: "none",
     },
     simulation: {
       model: "gpt-5.4",
@@ -31,10 +31,10 @@ test("uses the recommended OpenAI defaults", () => {
       },
     },
     scenarioGeneration: {
-      model: "gpt-4o-mini",
+      model: "gpt-6-luna",
       apiFamily: "chat_completions",
       maxOutputTokens: 1600,
-      reasoningEffort: null,
+      reasoningEffort: "none",
     },
     scoring: {
       model: "gpt-5.4",
@@ -43,12 +43,32 @@ test("uses the recommended OpenAI defaults", () => {
       reasoningEffort: "low",
     },
     transcription: {
-      model: "whisper-1",
+      model: "gpt-transcribe",
     },
     speech: {
-      model: "gpt-4o-mini-tts",
+      model: "gpt-realtime-2.1-mini",
     },
   });
+});
+
+test("retiring chat/transcription pins migrate while explicit speech pins remain temporary rollback options", () => {
+  for (const tts of ["tts-1", "tts-1-hd", "gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-12-15"]) {
+    const config = loadOpenAiModelConfig({ OPENAI_CHAT_MODEL: "gpt-4o-mini", OPENAI_SCENARIO_GENERATION_MODEL: "gpt-4o-mini-2024-07-18",
+      OPENAI_TRANSCRIPTION_MODEL: "whisper-1", OPENAI_TTS_MODEL: tts });
+    assert.equal(config.chat.model, "gpt-6-luna");
+    assert.equal(config.chat.reasoningEffort, "none");
+    assert.equal(config.scenarioGeneration.model, "gpt-6-luna");
+    assert.equal(config.transcription.model, "gpt-transcribe");
+    assert.equal(config.speech.model, tts);
+    assert.equal(config.simulation.model, "gpt-5.4");
+    assert.equal(config.scoring.model, "gpt-5.4");
+  }
+});
+
+test("scenario generation still inherits explicitly configured chat reasoning", () => {
+  const config = loadOpenAiModelConfig({ OPENAI_CHAT_MODEL: "gpt-6-luna", OPENAI_CHAT_REASONING_EFFORT: "low" });
+  assert.equal(config.chat.reasoningEffort, "low");
+  assert.equal(config.scenarioGeneration.reasoningEffort, "low");
 });
 test("preserves Responses API routing for the currently deployed simulation model", () => {
   const config = loadOpenAiModelConfig({
@@ -76,7 +96,7 @@ test("supports the recommended GPT-5.4 Responses profile with low reasoning", ()
     OPENAI_SIMULATION_SCORE_REASONING_EFFORT: "low",
   });
 
-  assert.equal(config.chat.model, "gpt-4o-mini");
+  assert.equal(config.chat.model, "gpt-6-luna");
   assert.equal(config.chat.apiFamily, "chat_completions");
   assert.equal(config.simulation.model, "gpt-5.4");
   assert.equal(config.simulation.apiFamily, "responses");
@@ -85,8 +105,8 @@ test("supports the recommended GPT-5.4 Responses profile with low reasoning", ()
   assert.equal(config.scoring.model, "gpt-5.4");
   assert.equal(config.scoring.apiFamily, "responses");
   assert.equal(config.scoring.reasoningEffort, "low");
-  assert.equal(config.transcription.model, "whisper-1");
-  assert.equal(config.speech.model, "gpt-4o-mini-tts");
+  assert.equal(config.transcription.model, "gpt-transcribe");
+  assert.equal(config.speech.model, "gpt-realtime-2.1-mini");
 });
 
 test("supports the deployed GPT-5.4 mini chat Responses profile with low reasoning", () => {
@@ -224,8 +244,8 @@ test("routes GPT-6 Luna and GPT-6.1 Sol through Responses with supported reasoni
     maxOutputTokens: 1200,
     reasoningEffort: "medium",
   });
-  assert.deepEqual(config.transcription, { model: "whisper-1" });
-  assert.deepEqual(config.speech, { model: "gpt-4o-mini-tts" });
+  assert.deepEqual(config.transcription, { model: "gpt-transcribe" });
+  assert.deepEqual(config.speech, { model: "gpt-realtime-2.1-mini" });
 
   const rollback = loadOpenAiModelConfig({
     OPENAI_SIMULATION_MODEL: "gpt-6-luna",
@@ -288,7 +308,7 @@ test("startup observability logs only the resolved non-secret routing values", (
   assert.deepEqual(lines, [
     "[openai-routing] simulation model=gpt-5.6-luna api=responses reasoning=low",
     "[openai-routing] scoring model=gpt-5.6-terra api=responses reasoning=medium",
-    "[openai-routing] scenario-generation model=gpt-4o-mini api=chat_completions reasoning=default",
+    "[openai-routing] scenario-generation model=gpt-6-luna api=chat_completions reasoning=none",
   ]);
   assert.equal(lines.join("\n").includes("must-not-appear"), false);
 });

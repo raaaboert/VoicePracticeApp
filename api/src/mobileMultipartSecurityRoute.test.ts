@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { syntheticSpeechAudio } from "./services/speechActivity.testSupport.js";
 import crypto from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Server } from "node:http";
@@ -133,7 +134,7 @@ function buildForm(fileBytes: number, options?: { fields?: number; oversizedNest
       form.append(`field${index}`, "value");
     }
   }
-  form.append("file", new Blob([new Uint8Array(fileBytes)], { type: "audio/mp4" }), "voice.m4a");
+  form.append("file", new Blob([syntheticSpeechAudio(fileBytes)], { type: "audio/mp4" }), "voice.m4a");
   return form;
 }
 

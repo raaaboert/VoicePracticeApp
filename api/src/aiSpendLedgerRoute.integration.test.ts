@@ -21,7 +21,7 @@ test("PostgreSQL record-mode HTTP TTS preserves auth, successful audio and exist
       MOBILE_TOKEN_SECRET: "ai_ledger_http_mobile_token_secret_32_characters", WEB_AUTH_TOKEN_SECRET: "ai_ledger_http_web_token_secret_32_characters",
       ADMIN_TOKEN_SECRET: "ai_ledger_http_admin_token_secret_32_characters", ADMIN_BOOTSTRAP_PASSWORD: "ai_ledger_http_local_password",
       SUPPORT_TRANSCRIPT_SECRET: "ai_ledger_http_support_secret_32_characters", TRAINING_CONTENT_STORAGE_PROVIDER: "disabled",
-      ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false", OPENAI_API_KEY: "local-mocked-provider-key", ENABLE_REMOTE_TTS: "true",
+      ENABLE_INTERNAL_DEBUG_ENDPOINTS: "false", OPENAI_API_KEY: "local-mocked-provider-key", ENABLE_REMOTE_TTS: "true", OPENAI_TTS_MODEL: "test-legacy-speech-model",
       AI_SPEND_LEDGER_MODE: "record", AI_SPEND_LEDGER_HMAC_SECRET: "ai_ledger_http_distinct_fingerprint_secret_32_characters",
       OPENAI_MAX_DAILY_CALLS_GLOBAL: "2", OPENAI_MAX_DAILY_CALLS_PER_USER: "1",
       OPENAI_MAX_DAILY_TOKENS_GLOBAL: "1000000", OPENAI_MAX_DAILY_TOKENS_PER_USER: "1000000" });

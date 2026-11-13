@@ -41,10 +41,19 @@ export interface OpenAiModelConfig {
   };
 }
 
-const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
+const DEFAULT_CHAT_MODEL = "gpt-6-luna";
 const DEFAULT_SIMULATION_MODEL = "gpt-5.4";
-const DEFAULT_TRANSCRIPTION_MODEL = "whisper-1";
-const DEFAULT_SPEECH_MODEL = "gpt-4o-mini-tts";
+const DEFAULT_TRANSCRIPTION_MODEL = "gpt-transcribe";
+const DEFAULT_SPEECH_MODEL = "gpt-realtime-2.1-mini";
+
+// Migrate known retiring chat/transcription aliases even when an older deployment pins them.
+// Unknown explicit models remain operator-controlled; historical usage records are untouched.
+function currentModel(value: string | undefined, fallback: string): string {
+  const model = value?.trim() || fallback;
+  if (/^gpt-4o-mini(?:-2024-07-18)?$/.test(model)) return DEFAULT_CHAT_MODEL;
+  if (/^(?:whisper-1|gpt-4o(?:-mini)?-transcribe(?:-2025-12-15)?)$/.test(model)) return DEFAULT_TRANSCRIPTION_MODEL;
+  return model;
+}
 const DEFAULT_SIMULATION_REASONING_EFFORT: OpenAiReasoningEffort = "low";
 const DEFAULT_SIMULATION_MAX_OUTPUT_TOKENS: Record<SimulationRoute, number> = {
   opening: 160,
@@ -147,7 +156,7 @@ function resolveSimulationReasoningEffort(
 ): OpenAiReasoningEffort | null {
   const fallback = model.trim().toLowerCase() === DEFAULT_SIMULATION_MODEL
     ? DEFAULT_SIMULATION_REASONING_EFFORT
-    : null;
+    : model.trim().toLowerCase() === DEFAULT_CHAT_MODEL ? "none" : null;
   return parseReasoningEffort(envName, rawValue, fallback);
 }
 
@@ -168,10 +177,12 @@ function resolveSimulationMaxOutputTokens(params: {
 }
 
 export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): OpenAiModelConfig {
-  const chatModel = env.OPENAI_CHAT_MODEL?.trim() || DEFAULT_CHAT_MODEL;
-  const simulationModel = env.OPENAI_SIMULATION_MODEL?.trim() || DEFAULT_SIMULATION_MODEL;
-  const scoringModel = env.OPENAI_SCORING_MODEL?.trim() || simulationModel;
-  const scenarioGenerationModel = env.OPENAI_SCENARIO_GENERATION_MODEL?.trim() || chatModel;
+  const chatModel = currentModel(env.OPENAI_CHAT_MODEL, DEFAULT_CHAT_MODEL);
+  const simulationModel = currentModel(env.OPENAI_SIMULATION_MODEL, DEFAULT_SIMULATION_MODEL);
+  const scoringModel = currentModel(env.OPENAI_SCORING_MODEL, simulationModel);
+  const scenarioGenerationModel = currentModel(env.OPENAI_SCENARIO_GENERATION_MODEL, chatModel);
+  const chatReasoning = parseReasoningEffort("OPENAI_CHAT_REASONING_EFFORT", env.OPENAI_CHAT_REASONING_EFFORT,
+    chatModel === DEFAULT_CHAT_MODEL ? "none" : null);
   const legacySimulationMaxOutputTokens = parseLegacySimulationMaxOutputTokens(
     env.OPENAI_SIMULATION_MAX_OUTPUT_TOKENS
   );
@@ -200,7 +211,7 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
     chat: {
       model: chatModel,
       apiFamily: parseApiFamily("OPENAI_CHAT_API_FAMILY", env.OPENAI_CHAT_API_FAMILY, "chat_completions"),
-      reasoningEffort: parseReasoningEffort("OPENAI_CHAT_REASONING_EFFORT", env.OPENAI_CHAT_REASONING_EFFORT),
+      reasoningEffort: chatReasoning,
     },
     simulation: {
       model: simulationModel,
@@ -238,7 +249,7 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
       }),
       reasoningEffort: parseReasoningEffort(
         "OPENAI_SCENARIO_GENERATION_REASONING_EFFORT", env.OPENAI_SCENARIO_GENERATION_REASONING_EFFORT,
-        parseReasoningEffort("OPENAI_CHAT_REASONING_EFFORT", env.OPENAI_CHAT_REASONING_EFFORT),
+        chatReasoning ?? (scenarioGenerationModel === DEFAULT_CHAT_MODEL ? "none" : null),
       ),
     },
     scoring: {
@@ -261,9 +272,11 @@ export function loadOpenAiModelConfig(env: NodeJS.ProcessEnv = process.env): Ope
       ),
     },
     transcription: {
-      model: env.OPENAI_TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
+      model: currentModel(env.OPENAI_TRANSCRIPTION_MODEL, DEFAULT_TRANSCRIPTION_MODEL),
     },
     speech: {
+      // An explicit still-supported legacy speech pin is an emergency rollback;
+      // omission always selects Realtime. Operators must respect shutdown dates.
       model: env.OPENAI_TTS_MODEL?.trim() || DEFAULT_SPEECH_MODEL,
     },
   };

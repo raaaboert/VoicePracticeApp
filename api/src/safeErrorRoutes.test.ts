@@ -6,6 +6,7 @@ import { AiBudgetLimitError, classifyAiRouteError, safeErrorDiagnostics } from "
 import { createTrainingPackStore } from "./storage/trainingPackStore.js";
 import { createOrganizationProductSettingsStore } from "./storage/organizationProductSettingsStore.js";
 import { AuthCodeDeliveryError } from "./services/authCodeDelivery.js";
+import { syntheticSpeechAudio } from "./services/speechActivity.testSupport.js";
 
 const secret = "sk-proj-DO_NOT_DISCLOSE_PROVIDER_CREDENTIAL";
 const privateText = "PRIVATE_UTTERANCE_AND_PROVIDER_JSON_FRAGMENT";
@@ -29,7 +30,7 @@ function json(body: unknown, headers?: Record<string, string>): RequestInit {
 }
 function audio(responseMode?: string): RequestInit {
   const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(2048)], { type: "audio/mp4" }), "voice.m4a");
+  form.append("file", new Blob([syntheticSpeechAudio()], { type: "audio/mp4" }), "voice.m4a");
   form.append("payload", JSON.stringify({ scenarioId: STANDARD_SCENARIO_ID, industryId: "technology",
     difficulty: "medium", personaStyle: "skeptical", ...(responseMode ? { responseMode } : {}) }));
   return { method: "POST", body: form };
@@ -55,7 +56,8 @@ async function checkFailure(response: Response, status: number, code: string) {
 }
 
 before(async () => {
-  harness = await startPromptRouteHarness({ modularEnvironmentEnabled: false, remoteTtsEnabled: true });
+  // These fixtures mock HTTP error bodies; Realtime transport has its own route regression.
+  harness = await startPromptRouteHarness({ modularEnvironmentEnabled: false, remoteTtsEnabled: true, speechModel: "test-legacy-speech-model" });
   api = await import("./index.js");
   const login = await harness.request("/auth/login", json({ password: "prompt-route-admin-password" }));
   assert.equal(login.status, 200);
