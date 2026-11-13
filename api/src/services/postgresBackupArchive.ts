@@ -12,6 +12,11 @@ const exec = promisify(execFile);
 const MAGIC = Buffer.from("PERITIO-PG-1\n");
 export const HEADER_LIMIT = 16_384;
 export const DAY_MS = 86_400_000;
+export const POSTGRES_BACKUP_TARGETS = {
+  staging: { databaseName: "voicepractice_db", renderName: "voicepractice_db", bucket: "peritio-postgres-backups-staging" },
+  production: { databaseName: "peritio_db_prod", renderName: "peritio-db-prod", bucket: "peritio-postgres-backups-production" },
+} as const;
+export type BackupEnvironment = keyof typeof POSTGRES_BACKUP_TARGETS;
 
 export class PostgresBackupError extends Error {
   constructor(readonly code: string) { super(code); this.name = "PostgresBackupError"; }
@@ -49,9 +54,9 @@ export function postgresProviderFailure(provider: "render" | "r2", error: unknow
 }
 export interface BackupHeader {
   format: "peritio-postgres-v1";
-  environment: "staging";
+  environment: BackupEnvironment;
   postgresId: string;
-  databaseName: "voicepractice_db";
+  databaseName: "voicepractice_db" | "peritio_db_prod";
   day: string;
   exportId: string;
   exportCreatedAt: string;
@@ -132,7 +137,9 @@ export async function readBackupHeader(file: string): Promise<{ header: BackupHe
     let header: BackupHeader;
     try { header = JSON.parse(json.toString("utf8")) as BackupHeader; }
     catch { throw new PostgresBackupError("invalid_archive_header"); }
-    requireBackup(header && typeof header === "object" && header.format === "peritio-postgres-v1" && header.environment === "staging" && header.databaseName === "voicepractice_db"
+    requireBackup(header && typeof header === "object" && header.format === "peritio-postgres-v1"
+      && (header.environment === "staging" || header.environment === "production")
+      && header.databaseName === POSTGRES_BACKUP_TARGETS[header.environment].databaseName
       && /^[0-9a-f]{64}$/.test(header.keyId) && typeof header.iv === "string" && Buffer.from(header.iv, "base64").length === 12
       && typeof header.wrappedKey === "string", "invalid_archive_header");
     return { header, prefix: Buffer.concat([fixed, json]) };

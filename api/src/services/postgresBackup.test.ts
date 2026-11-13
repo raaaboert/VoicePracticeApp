@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
 import {
   backupPrefix, checkIndependentPostgresBackup, createIndependentBackupStorage, createRenderBackupSource,
-  loadPostgresBackupConfig, runIndependentPostgresBackup, validateBackupManifest,
+  loadPostgresBackupConfig, runIndependentPostgresBackup, validateBackupManifest, dryRunIndependentPostgresBackup,
   type BackupManifest, type IndependentBackupStorage, type PostgresBackupConfig, type RenderBackupSource,
 } from "./postgresBackup.js";
 import { assertScratchRestoreTarget, backupKeyId, byteLimit, DAY_MS, decryptBackup, digestArchive, encryptBackup, postgresBackupFailureCode, postgresProviderFailure,
@@ -23,6 +23,13 @@ const ENV: NodeJS.ProcessEnv = { PERITIO_ENV: "staging", PG_BACKUP_RENDER_POSTGR
   PG_BACKUP_R2_ACCOUNT_ID: "a".repeat(32), PG_BACKUP_R2_ENDPOINT: `https://${"a".repeat(32)}.r2.cloudflarestorage.com`,
   PG_BACKUP_R2_ACCESS_KEY_ID: "synthetic-only", PG_BACKUP_R2_SECRET_ACCESS_KEY: "synthetic-only",
   PG_BACKUP_RENDER_API_KEY: "synthetic-render-token", PG_BACKUP_DOWNLOAD_HOSTS: "exports.example.com" };
+const PRODUCTION_ENV: NodeJS.ProcessEnv = { ...ENV, PERITIO_ENV: "production",
+  PG_BACKUP_RENDER_POSTGRES_ID: "dpg-p1234567890123456789-a", PG_BACKUP_RENDER_OWNER_ID: "tea-p1234567890123456789",
+  PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-production", PG_BACKUP_RENDER_DATABASE_NAME: "peritio-db-prod",
+  PG_BACKUP_PRODUCTION_AUTHORIZATION: "production:dpg-p1234567890123456789-a",
+  PG_BACKUP_RENDER_API_KEY: undefined, PG_BACKUP_R2_ACCESS_KEY_ID: undefined, PG_BACKUP_R2_SECRET_ACCESS_KEY: undefined,
+  PG_BACKUP_PRODUCTION_RENDER_API_KEY: "synthetic-production-render", PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID: "synthetic-production-id",
+  PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY: "synthetic-production-secret" };
 function fixtureArchive(): Buffer {
   const contents = Buffer.from("PGDMP synthetic fixture; not a database dump");
   const header = Buffer.alloc(512);
@@ -58,15 +65,17 @@ class MemoryStorage implements IndependentBackupStorage {
   }
   async manifests(prefix: string) { return [...this.objects.keys()].filter(key => key.startsWith(prefix) && key.endsWith("complete.json")); }
 }
-async function harness(t: TestContext, overrides: NodeJS.ProcessEnv = {}) {
+async function harness(t: TestContext, overrides: NodeJS.ProcessEnv = {}, target: "staging" | "production" = "staging") {
   const directory = await privateBackupDirectory(); t.after(() => removeBackupDirectory(directory));
   const publicFile = path.join(directory, "public.pem"); await writeFile(publicFile, KEY.publicKey);
-  const config = loadPostgresBackupConfig("staging", { ...ENV, ...overrides, PG_BACKUP_PUBLIC_KEY_FILE: publicFile });
+  const config = loadPostgresBackupConfig(target, { ...(target === "production" ? PRODUCTION_ENV : ENV), ...overrides,
+    [target === "production" ? "PG_BACKUP_PRODUCTION_PUBLIC_KEY_FILE" : "PG_BACKUP_PUBLIC_KEY_FILE"]: publicFile });
   const storage = new MemoryStorage(); let posts = 0, downloads = 0;
   let identityValid = true, downloadFails = false, ready = true;
   const source: RenderBackupSource = {
-    async identity() { return { id: config.postgresId, ownerId: config.renderOwnerId, name: "voicepractice_db",
-      databaseName: identityValid ? "voicepractice_db" : "peritio_db_prod", version: "17", available: true }; },
+    async identity() { return { id: config.postgresId, ownerId: config.renderOwnerId, name: config.renderDatabaseName,
+      databaseName: identityValid ? target === "production" ? "peritio_db_prod" : "voicepractice_db"
+        : target === "production" ? "voicepractice_db" : "peritio_db_prod", version: "17", available: true }; },
     async exports() { return posts ? [{ id: "export-synthetic", createdAt: NOW.toISOString(), ...(ready ? { url: "https://exports.example.com/synthetic" } : {}) }] : []; },
     async create() { posts++; },
     async download(_url, file) { downloads++; await writeFile(file, fixtureArchive(), { flag: "wx", mode: 0o600 });
@@ -80,7 +89,7 @@ async function harness(t: TestContext, overrides: NodeJS.ProcessEnv = {}) {
     interruptDownload() { downloadFails = true; }, notReady() { ready = false; } };
 }
 
-test("staging-only config rejects production, mixed buckets, endpoints and invalid retention", () => {
+test("staging config rejects production context, mixed buckets, endpoints and invalid retention", () => {
   assert.equal(loadPostgresBackupConfig("staging", ENV).bucket, "peritio-postgres-backups-staging");
   for (const changes of [{ PERITIO_ENV: "production" }, { PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-production" },
     { PG_BACKUP_R2_BUCKET: "peritio-postgres-backup-staging" },
@@ -96,8 +105,79 @@ test("freshness configuration preserves the default and accepts 144 hours only w
   for (const value of ["", "-1", "0", "24", "145", "144.5", "NaN", "Infinity"])
     assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_MAX_AGE_HOURS: value }), /invalid_backup_limit/);
   const extended = { ...ENV, PG_BACKUP_MAX_AGE_HOURS: "144" };
-  assert.throws(() => loadPostgresBackupConfig("production", extended), /staging_backup_target_required/);
-  assert.throws(() => loadPostgresBackupConfig("staging", { ...extended, PERITIO_ENV: "production" }), /staging_backup_target_required/);
+  assert.throws(() => loadPostgresBackupConfig("production", extended), /backup_target_environment_mismatch/);
+  assert.throws(() => loadPostgresBackupConfig("staging", { ...extended, PERITIO_ENV: "production" }), /backup_target_environment_mismatch/);
+});
+
+test("production requires explicit ID-bound authorization and isolated credentials; no fallback", () => {
+  const config = loadPostgresBackupConfig("production", PRODUCTION_ENV);
+  assert.equal(config.environment, "production"); assert.equal(config.bucket, "peritio-postgres-backups-production");
+  assert.equal(config.renderApiKey, "synthetic-production-render"); assert.equal(config.maxAgeHours, 36);
+  for (const changes of [{ PG_BACKUP_PRODUCTION_AUTHORIZATION: undefined }, { PG_BACKUP_PRODUCTION_AUTHORIZATION: "true" },
+    { PG_BACKUP_PRODUCTION_AUTHORIZATION: `production:${ENV.PG_BACKUP_RENDER_POSTGRES_ID}` },
+    { PG_BACKUP_R2_BUCKET: "peritio-postgres-backups-staging" }, { PG_BACKUP_R2_BUCKET: "peritio-training-content-backup-production" },
+    { PG_BACKUP_RENDER_DATABASE_NAME: "voicepractice_db" }, { PG_BACKUP_MAX_AGE_HOURS: "144" },
+    { PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID: undefined }, { PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY: undefined }])
+    assert.throws(() => loadPostgresBackupConfig("production", { ...PRODUCTION_ENV, ...changes }));
+  for (const name of ["RENDER_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "PUBLIC_KEY_FILE"]) {
+    assert.throws(() => loadPostgresBackupConfig("production", { ...PRODUCTION_ENV, [`PG_BACKUP_${name}`]: "staging-only" }), /cross_environment_backup_credentials/);
+    assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, [`PG_BACKUP_PRODUCTION_${name}`]: "production-only" }), /cross_environment_backup_credentials/);
+  }
+  assert.throws(() => loadPostgresBackupConfig("staging", { ...ENV, PG_BACKUP_PRODUCTION_AUTHORIZATION: "production:wrong" }));
+  assert.throws(() => loadPostgresBackupConfig(undefined, PRODUCTION_ENV));
+  assert.throws(() => loadPostgresBackupConfig("production", ENV));
+  assert.throws(() => loadPostgresBackupConfig("staging", PRODUCTION_ENV));
+});
+
+test("production archive, freshness, verification and isolated decryption preserve the existing format", async t => {
+  const h = await harness(t, {}, "production");
+  assert.equal((await h.run()).environment, "production");
+  assert.equal((await h.run()).outcome, "already_complete"); assert.equal(h.posts(), 1); assert.equal(h.downloads(), 1);
+  assert.ok(h.manifestKey.startsWith(`postgres/production/${h.config.postgresId}/`));
+  assert.equal(h.manifest().header.environment, "production"); assert.equal(h.manifest().header.databaseName, "peritio_db_prod");
+  h.storage.putFile = async () => { throw Error("check attempted write"); };
+  h.storage.putManifest = async () => { throw Error("check attempted write"); };
+  for (const full of [false, true]) {
+    const report = await checkIndependentPostgresBackup(h.config, h.storage, full, new Date(NOW.getTime() + 36 * 3600_000));
+    assert.equal(report.environment, "production"); assert.equal(report.checksumVerified, full);
+    await assert.rejects(checkIndependentPostgresBackup(h.config, h.storage, full, new Date(NOW.getTime() + 36 * 3600_000 + 1)), /backup_stale/);
+  }
+  const encrypted = path.join(h.directory, "production.pgbak"), plain = path.join(h.directory, "restore.tar.gz");
+  await writeFile(encrypted, h.storage.objects.get(h.manifestKey.replace("complete.json", "archive.pgbak"))!.body);
+  await decryptBackup(encrypted, plain, KEY.privateKey, h.manifest(), TARGET);
+  assert.deepEqual(await readFile(plain), fixtureArchive());
+});
+
+test("cross-wired Render identities stop production and staging before export or destination writes", async t => {
+  for (const target of ["staging", "production"] as const) {
+    for (const mismatch of ["id", "ownerId", "name", "databaseName"] as const) {
+      const h = await harness(t, {}, target), identity = await h.source.identity(new AbortController().signal);
+      h.source.identity = async () => ({ ...identity, [mismatch]: mismatch === "databaseName"
+        ? target === "production" ? "voicepractice_db" : "peritio_db_prod" : "wrong-environment" });
+      await assert.rejects(h.run(), /render_database_identity_mismatch/);
+      assert.equal(h.posts(), 0); assert.equal(h.downloads(), 0); assert.equal(h.storage.objects.size, 0);
+    }
+  }
+});
+
+test("cross-environment retained headers cannot be used to complete or verify a production slot", async t => {
+  const staging = await harness(t), production = await harness(t, {}, "production"); await staging.run();
+  for (const [key, object] of staging.storage.objects) production.storage.objects.set(key.replace(backupPrefix(staging.config), backupPrefix(production.config)), object);
+  await assert.rejects(production.run(), /backup_identity_mismatch/);
+  for (const full of [false, true]) await assert.rejects(checkIndependentPostgresBackup(production.config, production.storage, full, NOW), /backup_identity_mismatch/);
+  assert.equal(production.posts(), 0);
+});
+
+test("dry-run checks identity, public key and list permission with no exports, transfers or writes", async t => {
+  for (const target of ["staging", "production"] as const) {
+    const h = await harness(t, {}, target);
+    const prohibited = async () => { throw Error("dry-run attempted mutation or transfer"); };
+    h.source.exports = prohibited; h.source.create = prohibited; h.source.download = prohibited;
+    h.storage.putFile = prohibited; h.storage.putManifest = prohibited; h.storage.download = prohibited;
+    const result = await dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source });
+    assert.equal(result.outcome, "dry_run_validated"); assert.equal(result.environment, target); assert.equal(result.mutationsPerformed, false);
+    h.invalidIdentity(); await assert.rejects(dryRunIndependentPostgresBackup(h.config, { storage: h.storage, source: h.source }), /render_database_identity_mismatch/);
+  }
 });
 
 test("actual configuration loader accepts Render base, primary and replica ID formats", () => {

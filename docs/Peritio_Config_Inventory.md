@@ -129,38 +129,49 @@ lock, and absence of custom lifecycle deletion are validated provider settings,
 not repository-enforced facts. Reverify them manually. Do not disable the lock
 for recovery.
 
-## Independent PostgreSQL Backups — A2.2 staging tooling
+## Independent PostgreSQL Backups — isolated staging and production tooling
 
 These settings are read by the A2.2 tooling, not by normal API startup. The job
 and independent monitor are **not configured or activated by this repository**.
-Production is rejected. See the [A2.2 recovery/setup procedure](./Peritio_Postgres_Independent_Backups.md)
+Production requires explicit target/environment/ID-bound confirmation and separate credentials. See the [recovery/setup procedure](./Peritio_Postgres_Independent_Backups.md)
 for the difference between implemented commands and operator configuration examples.
 Do not copy the API's entire environment or a production credential into the job.
 
 | Variable | Purpose / owner | Applicability | Recovery / rotation requirement |
 | --- | --- | --- | --- |
-| `PERITIO_ENV` | Target gate; backup operator | Job/monitor: `staging`; offline decrypt: `development` | Must match the command; decrypt also refuses hosted Render context. |
+| `PERITIO_ENV` | Target gate; backup operator | Job/monitor: `staging` or `production`; offline decrypt: `development` | Must match explicit command target; decrypt also refuses hosted Render context. |
 | `PG_BACKUP_RENDER_POSTGRES_ID` | Exact source identity; database owner | Job/monitor | Preserve the complete Render ID, including any lowercase suffix. Checked against instance metadata before new export creation. |
-| `PG_BACKUP_RENDER_OWNER_ID` | Source owner identity; database owner | Job/monitor | Recover the intended workspace/principal ID; never substitute a production source. |
-| `PG_BACKUP_RENDER_DATABASE_NAME` | Exact Render display name; database owner | Export job | Defaults to staging display name `voicepractice_db`; databaseName is separately required to be `voicepractice_db`. |
+| `PG_BACKUP_RENDER_OWNER_ID` | Source owner identity; database owner | Job/monitor | Recover the intended target environment's workspace/principal ID; never substitute the other environment's source. |
+| `PG_BACKUP_RENDER_DATABASE_NAME` | Exact Render display name; database owner | Export job | Staging pinned to `voicepractice_db` / SQL `voicepractice_db`; production pinned to `peritio-db-prod` / SQL `peritio_db_prod`. Unexpected renames fail closed. |
 | `PG_BACKUP_RENDER_API_KEY` | Export-list/create credential; backup owner | Export job only | Secret. Rotate at Render and update only the dedicated job. Scope availability and effective privileges require provider verification. Not needed for read-only R2 checks. |
 | `PG_BACKUP_DOWNLOAD_HOSTS` | Exact HTTPS download-host allowlist; backup owner | Export download | Hostnames only; never store a signed URL here. Verify privately before changing. |
 | `PG_BACKUP_R2_ACCOUNT_ID`, `PG_BACKUP_R2_ENDPOINT` | Dedicated archive account/endpoint; storage owner | Job/monitor/operator download | Must agree; recover from owner-controlled configuration. Not inherited from media R2 settings. |
-| `PG_BACKUP_R2_BUCKET` | Private independent archive lane; storage owner | Staging tooling | Must be `peritio-postgres-backups-staging`; bucket privacy/lock/lifecycle remain manual controls. |
+| `PG_BACKUP_R2_BUCKET` | Private independent archive lane; storage owner | Both isolated modes | Must match `peritio-postgres-backups-staging` or `peritio-postgres-backups-production` for the explicit target. Media bucket is never a PostgreSQL destination. Bucket privacy/lock/lifecycle remain manual controls; no existing policy is changed. |
 | `PG_BACKUP_R2_ACCESS_KEY_ID`, `PG_BACKUP_R2_SECRET_ACCESS_KEY` | Archive access; storage owner | Writer or read-only monitor/operator | Secret. Give the monitor a separate bucket read-only credential. Rotate without exposing values. No media-bucket or production access required. |
 | `PG_BACKUP_PUBLIC_KEY_FILE` | SPKI public encryption key; backup owner | New archive encryption | Public key only; a private-key PEM is rejected. Rotate only after the matching new private key is securely escrowed and recoverable. |
 | `PG_BACKUP_RETENTION_DAYS` | Manifest expiry policy; storage owner | Job | Default 30, allowed 7–90. Must agree with owner-configured physical lifecycle/lock policy; changing this variable does not change R2. |
-| `PG_BACKUP_MAX_AGE_HOURS` | Freshness threshold; backup owner | Monitor/check | Default 36, allowed 25–144. Set 144 for staging schedule `0 9 */5 * *` (up to 120 hours between runs plus 24 hours of grace); use the same value for independent checks. No automatic scheduling or notification delivery is implied. |
+| `PG_BACKUP_MAX_AGE_HOURS` | Freshness threshold; backup owner | Monitor/check | Default 36; staging 25–144, production 25–48. Keep 144 for staging `0 9 */5 * *`; production daily `0 9 * * *` uses 36 on writer/checker. No scheduling/notification delivery is implied. |
 | `PG_BACKUP_MAX_BYTES` | Compressed export cap; backup owner | Job/download/verification | Default 512 MiB, up to 4 GiB. Does not redesign or extend request/job time budgets. |
 | `PG_BACKUP_PRIVATE_KEY_FILE` | Protected recovery-key file; recovery operator | Offline decryption only | Never configure on the scheduled job, commit or disclose it. Recover the matching historical keyId from encrypted escrow, then remove the unencrypted working copy after use. Key loss makes the corresponding archives unrecoverable. |
 | `PG_BACKUP_RESTORE_URL` | Nonconnecting scratch-target guard; recovery operator | Offline decryption only | Restricted to loopback, port 55432 and `peritio_restore_*`. It is not a database connection, authorization, identity or emptiness check (F9 deferred). Do not provide hosted database URLs. |
+| `PG_BACKUP_PRODUCTION_AUTHORIZATION` | Explicit production resource opt-in; owner | Production writer/dry-run/monitor | Exact `production:<production-dpg-id>`. Nonsecret; never enables staging fallback. Forbidden in staging. |
+| `PG_BACKUP_PRODUCTION_RENDER_API_KEY` | Dedicated production export credential; owner | Production writer/dry-run | Secret; no fallback to staging `PG_BACKUP_RENDER_API_KEY`, which must be absent. Scope actual provider access separately. |
+| `PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID`, `PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY` | Production PostgreSQL-bucket-only credential | Production writer or independent read-only monitor | Secret; provision separate writer/read-only tokens. Staging-family credential variables must be absent in production, production-family variables absent in staging. Variable names cannot prove token scopes or detect manually duplicated secrets. |
+| `PG_BACKUP_PRODUCTION_PUBLIC_KEY_FILE` | Separate production SPKI public PEM | Production writer/dry-run | Set path `/etc/secrets/postgres-production-public.pem`; upload only public PEM as a Render secret file. No private key on Cron. Canonical staging public-key setting must be absent. |
+| `PG_BACKUP_RESTORE_ENVIRONMENT`, `PG_BACKUP_RESTORE_POSTGRES_ID` | Independently pinned archive origin | Local offline recovery | Staging environment remains default for existing drills; production requires `production` plus exact independently recorded production source ID. Wrong origin refuses plaintext publication. |
 
 The private recovery key itself, its encrypted escrow copies and recovery access
 must survive both provider-account loss and job-host loss. Do not leave a generated
 unencrypted `private.pem` on disk after verifying escrow. Rotating the public key
 does not re-encrypt old archives or remove the need for old private keys. Neither
-encryption nor a checksum proves Peritio producer authenticity; the signing/trusted
-provenance decision and transient-retry work are required before production automation.
+encryption nor a checksum proves Peritio producer authenticity. The selected
+release recommendation is bounded fail-fast transport behavior, tested failure
+and independent freshness alerts, at most one supervised same-day transient-failure
+rerun, and unsigned archives with restricted identities, locked retention and an
+independent protected provenance record. See the setup guide's final release
+policy. No signing infrastructure or automatic retry loop is introduced. These
+operational controls and a real isolated restore must be verified before activation;
+this change does not claim they are configured or tested in production.
 
 The example GitHub monitor's `PG_BACKUP_STAGING_POSTGRES_ID` and
 `PG_BACKUP_STAGING_OWNER_ID` repository variables map into the canonical runtime

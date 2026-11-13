@@ -24,14 +24,14 @@ function syntheticTar(): Buffer {
   header.write([...header].reduce((total, value) => total + value, 0).toString(8).padStart(6, "0") + "\0 ", 148);
   return gzipSync(Buffer.concat([header, body, Buffer.alloc(512 - body.length), Buffer.alloc(1024)]));
 }
-async function restoreFixture(t: TestContext, plaintext = syntheticTar()) {
+async function restoreFixture(t: TestContext, plaintext = syntheticTar(), environment: "staging" | "production" = "staging") {
   const root = await privateBackupDirectory(); t.after(() => removeBackupDirectory(root));
   const directory = path.join(root, "Windows paths with spaces"); await mkdir(directory, { mode: 0o700 });
   const input = path.join(directory, "archive.pgbak"), output = path.join(directory, "restored export.dir.tar.gz");
   const manifestFile = path.join(directory, "complete.json"), keyFile = path.join(directory, "synthetic.key");
   const source = path.join(directory, "source.dir.tar.gz"); await writeFile(source, plaintext, { mode: 0o600 });
-  const header = await encryptBackup(source, input, { format: "peritio-postgres-v1", environment: "staging",
-    postgresId: "dpg-c1234567890123456789-a", databaseName: "voicepractice_db", day: "2026-11-04",
+  const header = await encryptBackup(source, input, { format: "peritio-postgres-v1", environment,
+    postgresId: "dpg-c1234567890123456789-a", databaseName: environment === "production" ? "peritio_db_prod" : "voicepractice_db", day: "2026-11-04",
     exportId: "synthetic-export", exportCreatedAt: "2026-11-04T08:00:00.000Z", archivedAt: "2026-11-04T08:00:00.000Z",
     postgresVersion: "17", retentionDays: 30, toolRevision: "synthetic-fixture" }, RECOVERY.publicKey);
   await rm(source); // No original plaintext remains to obscure cleanup assertions.
@@ -49,11 +49,13 @@ async function restoreFixture(t: TestContext, plaintext = syntheticTar()) {
   return { directory, input, output, manifestFile, manifest, env, args, baseline, noPlaintext, plaintext };
 }
 
-test("backup CLI requires exactly one operation, an explicit staging target and no additional write flags", () => {
-  for (const args of [[], ["--run"], ["--run", "--target", "production"], ["--run", "--target", "staging", "--apply"],
+test("backup CLI requires exactly one operation, an explicit environment target and no additional write flags", () => {
+  for (const args of [[], ["--run"], ["--run", "--target", "prod"], ["--run", "--target", "staging", "--apply"],
     ["--run", "--check", "--target", "staging"], ["--run", "--target", "staging", "--target", "production"]])
     assert.throws(() => parsePostgresBackupArgs(args));
   assert.equal(parsePostgresBackupArgs(["--check", "--target", "staging"]).mode, "check");
+  for (const target of ["staging", "production"]) for (const mode of ["run", "check", "verify", "dry-run"])
+    assert.equal(parsePostgresBackupArgs([`--${mode}`, "--target", target]).target, target);
 });
 test("restore preparation rejects hosted contexts and remote targets before reading any files or keys", async () => {
   const args = ["--decrypt", "--target", "scratch", "--archive", "unused", "--manifest", "unused", "--output", "unused"];
@@ -65,11 +67,30 @@ test("CLI failure exits nonzero without echoing credential-like values or provid
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["SystemRoot", "PATH", "TEMP", "TMP", "ComSpec", "PATHEXT", "NODE_OPTIONS"]) if (process.env[key]) env[key] = process.env[key];
   env.PERITIO_ENV = "production"; env.PG_BACKUP_RENDER_API_KEY = "synthetic-secret-never-log";
+  env.PG_BACKUP_RENDER_POSTGRES_ID = "dpg-c1234567890123456789-a"; env.PG_BACKUP_RENDER_OWNER_ID = "tea-c1234567890123456789";
   const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./postgres-backup.ts", import.meta.url)), "--run", "--target", "production"],
     { env, encoding: "utf8", timeout: 10_000 });
   assert.equal(result.status, 1); assert.equal(result.stdout, "");
   assert.equal(result.stderr.includes("synthetic-secret-never-log"), false);
-  assert.equal(JSON.parse(result.stderr.trim()).code, "invalid_backup_target");
+  assert.equal(JSON.parse(result.stderr.trim()).code, "production_backup_authorization_required");
+});
+
+test("production CLI modes reject cross-environment context and missing authorization before provider access", async () => {
+  for (const mode of ["run", "check", "verify", "dry-run"]) {
+    await assert.rejects(postgresBackupMain([`--${mode}`, "--target", "production"], { PERITIO_ENV: "staging" }), /backup_target_environment_mismatch/);
+    await assert.rejects(postgresBackupMain([`--${mode}`, "--target", "staging"], { PERITIO_ENV: "production" }), /backup_target_environment_mismatch/);
+  }
+});
+
+test("production offline recovery requires independently pinned source environment and ID", async t => {
+  const h = await restoreFixture(t, syntheticTar(), "production");
+  await assert.rejects(postgresBackupMain(h.args, h.env), /restore_source_environment_mismatch/); await h.noPlaintext();
+  const production = { ...h.env, PG_BACKUP_RESTORE_ENVIRONMENT: "production" };
+  await assert.rejects(postgresBackupMain(h.args, production), /restore_source_identity_required/); await h.noPlaintext();
+  await assert.rejects(postgresBackupMain(h.args, { ...production, PG_BACKUP_RESTORE_POSTGRES_ID: "dpg-wrong" }), /restore_source_identity_mismatch/); await h.noPlaintext();
+  const report = await postgresBackupMain(h.args, { ...production, PG_BACKUP_RESTORE_POSTGRES_ID: h.manifest.header.postgresId });
+  assert.equal(report.sourceEnvironment, "production"); assert.equal(report.databaseRestoreExecuted, false);
+  assert.deepEqual(await readFile(h.output), h.plaintext);
 });
 test("complete CLI decryption validates manifest and tar before publishing; Windows drive/space paths work", async t => {
   const h = await restoreFixture(t);
