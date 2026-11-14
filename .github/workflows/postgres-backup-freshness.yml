@@ -1,0 +1,84 @@
+name: PostgreSQL backup freshness
+
+on:
+  schedule:
+    # Avoid the busiest minute at the top of the hour. All times are UTC.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      test_failure:
+        description: 'Test failure notifications only (no R2 requests)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  production:
+    name: Production backup (36 hours)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Intentional notification-test failure
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_failure }}
+        run: |
+          echo '::error::Intentional backup-monitor notification test; no R2 requests performed.'
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+          cache: npm
+      - name: Install backup CLI dependencies without lifecycle scripts
+        run: npm ci --include=dev --ignore-scripts --workspace @voicepractice/api --workspace @voicepractice/shared --include-workspace-root
+      - name: Check completed production backup freshness (read-only)
+        run: npm run backup:postgres -- --target production --check
+        env:
+          PERITIO_ENV: production
+          PG_BACKUP_RENDER_POSTGRES_ID: ${{ vars.PG_BACKUP_PRODUCTION_POSTGRES_ID }}
+          PG_BACKUP_RENDER_OWNER_ID: ${{ vars.PG_BACKUP_PRODUCTION_OWNER_ID }}
+          PG_BACKUP_PRODUCTION_AUTHORIZATION: production:${{ vars.PG_BACKUP_PRODUCTION_POSTGRES_ID }}
+          PG_BACKUP_R2_ACCOUNT_ID: ${{ vars.PG_BACKUP_PRODUCTION_R2_ACCOUNT_ID }}
+          PG_BACKUP_R2_ENDPOINT: ${{ vars.PG_BACKUP_PRODUCTION_R2_ENDPOINT }}
+          PG_BACKUP_R2_BUCKET: peritio-postgres-backups-production
+          PG_BACKUP_MAX_AGE_HOURS: '36'
+          PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID: ${{ secrets.PG_BACKUP_PRODUCTION_READ_ACCESS_KEY_ID }}
+          PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY: ${{ secrets.PG_BACKUP_PRODUCTION_READ_SECRET_ACCESS_KEY }}
+
+  staging:
+    name: Staging backup (144 hours)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Intentional notification-test failure
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_failure }}
+        run: |
+          echo '::error::Intentional backup-monitor notification test; no R2 requests performed.'
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+          cache: npm
+      - name: Install backup CLI dependencies without lifecycle scripts
+        run: npm ci --include=dev --ignore-scripts --workspace @voicepractice/api --workspace @voicepractice/shared --include-workspace-root
+      - name: Check completed staging backup freshness (read-only)
+        run: npm run backup:postgres -- --target staging --check
+        env:
+          PERITIO_ENV: staging
+          PG_BACKUP_RENDER_POSTGRES_ID: ${{ vars.PG_BACKUP_STAGING_POSTGRES_ID }}
+          PG_BACKUP_RENDER_OWNER_ID: ${{ vars.PG_BACKUP_STAGING_OWNER_ID }}
+          PG_BACKUP_R2_ACCOUNT_ID: ${{ vars.PG_BACKUP_STAGING_R2_ACCOUNT_ID }}
+          PG_BACKUP_R2_ENDPOINT: ${{ vars.PG_BACKUP_STAGING_R2_ENDPOINT }}
+          PG_BACKUP_R2_BUCKET: peritio-postgres-backups-staging
+          PG_BACKUP_MAX_AGE_HOURS: '144'
+          PG_BACKUP_R2_ACCESS_KEY_ID: ${{ secrets.PG_BACKUP_STAGING_READ_ACCESS_KEY_ID }}
+          PG_BACKUP_R2_SECRET_ACCESS_KEY: ${{ secrets.PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY }}

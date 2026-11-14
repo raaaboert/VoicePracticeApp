@@ -321,53 +321,45 @@ against a provider in this implementation batch.
 
 ### Independent stale check without a new paid monitoring service
 
-Use existing GitHub Actions capacity, after separate owner setup. Do not install
-this workflow or add secrets as part of this batch. The scheduled workflow must
-exist on the repository's default branch; it explicitly checks out staging code.
-Copy this template into an owner-reviewed workflow later. Set the four nonsecret
-repository variables and two **read-only staging bucket** secrets referenced below.
-No Render API token or encryption key is needed by the monitor.
+Implemented workflow: [PostgreSQL backup freshness](../.github/workflows/postgres-backup-freshness.yml). Independent production and staging jobs run at **00:17, 06:17, 12:17 and 18:17 UTC** (`17 */6 * * *`), each limited to ten minutes. Production checks main code with a 36-hour ceiling; staging checks staging code with a 144-hour ceiling. Both use existing `--check`: list manifests, read the latest completion metadata and HEAD its encrypted archive. No export, upload, database connection, Render API request, encryption-key access or full archive download occurs.
 
-```yaml
-name: Staging database backup freshness
-on:
-  schedule:
-    - cron: '0 10 * * *'
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      PERITIO_ENV: staging
-      PG_BACKUP_RENDER_POSTGRES_ID: ${{ vars.PG_BACKUP_STAGING_POSTGRES_ID }}
-      PG_BACKUP_RENDER_OWNER_ID: ${{ vars.PG_BACKUP_STAGING_OWNER_ID }}
-      PG_BACKUP_R2_ACCOUNT_ID: ${{ vars.PG_BACKUP_R2_ACCOUNT_ID }}
-      PG_BACKUP_R2_ENDPOINT: ${{ vars.PG_BACKUP_R2_ENDPOINT }}
-      PG_BACKUP_R2_BUCKET: peritio-postgres-backups-staging
-      PG_BACKUP_MAX_AGE_HOURS: '144'
-      PG_BACKUP_R2_ACCESS_KEY_ID: ${{ secrets.PG_BACKUP_STAGING_READ_ACCESS_KEY_ID }}
-      PG_BACKUP_R2_SECRET_ACCESS_KEY: ${{ secrets.PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: staging
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.22.2
-          cache: npm
-      - run: npm ci --include=dev
-      - run: npm run backup:postgres -- --target staging --check
-```
+Permissions are only `contents: read`; checkout does not persist Git credentials. R2 secrets exist only on the check step, not dependency installation. Only API/shared dependencies are installed, with TSX dev tooling and lifecycle scripts disabled: this read-only CLI needs no API/native build, FFmpeg download, mobile patch or schema setup. No application command or backup Cron changes.
 
-Configure the owner's GitHub notification preferences for failed runs and test
-delivery. Confirm private-repository Actions allowances and scheduled-workflow
-availability. Scheduled Actions can be delayed/disabled; the owner must still
-review both schedules and last-success age weekly. Until that independent check
-is configured and its alert delivery is demonstrated, stopped-scheduler detection
-remains an owner responsibility, not an implemented notification guarantee.
+Configure repository **Settings → Secrets and variables → Actions** yourself. Never paste credentials into chat, Git or workflow inputs.
+
+| Actions secret (exact name) | Saved credential to use |
+| --- | --- |
+| `PG_BACKUP_PRODUCTION_READ_ACCESS_KEY_ID` | Access ID from the production PostgreSQL bucket's saved **read-only** R2 credential |
+| `PG_BACKUP_PRODUCTION_READ_SECRET_ACCESS_KEY` | Matching secret from that production read-only credential |
+| `PG_BACKUP_STAGING_READ_ACCESS_KEY_ID` | Access ID from the staging PostgreSQL bucket's saved **read-only** R2 credential |
+| `PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY` | Matching secret from that staging read-only credential |
+
+Never use the writer tokens. Restrict each read-only token to its own PostgreSQL bucket with List/Head/Get capability and no writes/deletes or administration. Software cannot independently establish actual token scope; confirm it in Cloudflare. No Render API token, database URL, public/private key or shared application environment belongs in the monitor.
+
+| Actions variable (exact name) | Nonsecret value/source |
+| --- | --- |
+| `PG_BACKUP_PRODUCTION_POSTGRES_ID` | Exact production `dpg-...` ID already configured on its backup job |
+| `PG_BACKUP_PRODUCTION_OWNER_ID` | Production Render owner/workspace ID already used by that job |
+| `PG_BACKUP_PRODUCTION_R2_ACCOUNT_ID` | Account containing `peritio-postgres-backups-production` |
+| `PG_BACKUP_PRODUCTION_R2_ENDPOINT` | Matching `https://<account-id>.r2.cloudflarestorage.com` |
+| `PG_BACKUP_STAGING_POSTGRES_ID` | Exact staging `dpg-...` ID already configured on its backup job |
+| `PG_BACKUP_STAGING_OWNER_ID` | Staging Render owner/workspace ID already used by that job |
+| `PG_BACKUP_STAGING_R2_ACCOUNT_ID` | Account containing `peritio-postgres-backups-staging` |
+| `PG_BACKUP_STAGING_R2_ENDPOINT` | Matching account endpoint |
+
+If both buckets share an account, use the same account/endpoint values in the two environment-specific variable pairs; keep credentials separate. Buckets/thresholds are fixed in the workflow. Production's required `PG_BACKUP_PRODUCTION_AUTHORIZATION` is constructed as `production:<configured-production-dpg-id>`; no extra GitHub authorization variable/secret is required. Runtime credential names follow the existing loader's isolated families.
+
+**Activation after a separately approved main promotion:** staging-only delivery does not activate monitoring. The workflow must exist on default branch main; Actions must be enabled with applicable private-repository allowances available. Add the four secrets/eight variables first. Then **Actions → PostgreSQL backup freshness → Run workflow**, choose **main**, leave **test_failure unchecked**, and require both jobs green with `outcome: healthy`. Branch-specific code checkouts are fixed. There is no push/PR trigger.
+
+**Safe notification test:** watch the repository and enable GitHub **Settings → Notifications → System → Actions → Email/On GitHub**, with failed-workflow notifications. After activation, manually run with **test_failure checked**. Each job emits one fixed intentional error and exits 1 before checkout, installation or access to R2 secrets. Both red jobs are expected; confirm owner email receipt. Run again unchecked and confirm both jobs green. The option is ignored by scheduled runs and never changes backup ages, secrets, objects or schedules. Only-failure settings do not promise success/recovery email.
+
+A real missing/stale/malformed backup, permission error or configuration error fails the normal command/job; failures are not swallowed and one environment's failure does not skip the other job. The intentional failure tests notification routing; offline validation covers actual missing/stale behavior. Scheduled notification routing follows GitHub's last-cron-editor rules: verify the intended owner receives actual scheduled failures too. No email recipient or webhook secret is embedded.
+
+GitHub may delay/drop scheduled runs, disable inactive public-repository schedules or exhaust private Actions allowances. Review last executions weekly: this detects a stopped Render writer, not a stopped GitHub scheduler. Nominal stale detection is within six hours after the threshold plus scheduling/delivery delay. Local validation does not prove actual alert delivery.
+
+Primary references: [schedule/default-branch rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule), [manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch), [Actions notifications](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications).
+
+Monitoring implementation validation: **7/7 focused offline checks passed** with Node 24.22.2. Validation parsed the actual YAML, checked restricted permissions/secret-step scope and both configuration mappings, exercised the existing read-only checker with synthetic manifests at exact 36/144-hour boundaries and missing/stale states, and executed each fixed intentional-failure shell step locally. No application source or dependencies changed. No GitHub run, provider request, credential inspection or secret configuration occurred; live notification delivery remains unverified. The temporary validation harness/log is outside the repository under the existing local QA directory.
 
 ## Offline restore preparation — no restore was executed
 
@@ -586,7 +578,7 @@ replace the example paths below consistently with that local directory.
 | Archive signing / F4 producer trust | **Release recommendation resolved:** unsigned encrypted archives with restricted identities, immutable retention and independently preserved run/digest/source provenance. No cryptographic producer-authenticity claim or signing infrastructure. Required operational controls are listed below; activation is not claimed. |
 | F5 — maintenance-scheduled status handling | Deferred; current availability check remains unchanged. |
 | F7 — larger archive transfer budgets | Deferred; current size and request/job budgets remain. |
-| F8 — monitoring schedule tuning | Deferred; example schedules and owner setup remain examples, not activated controls. |
+| F8 — monitoring schedule tuning | Six-hour production/staging workflow is implemented. Main promotion, owner secrets/variables and tested notifications remain activation requirements. |
 | F9 — unused restore URL guard | Deferred; the guard is nonconnecting and is not proof of a target database's identity/emptiness. |
 | Second cloud backup provider | Deferred; no additional provider or infrastructure introduced. |
 
@@ -722,7 +714,7 @@ Configure these exact names on the production job. These are new owner settings,
 
 ### Freshness monitoring and final release policy
 
-Use the existing independent-check workflow template in this guide with checkout ref **main**, target **production**, `PERITIO_ENV=production`, production ID/owner/confirmation and production bucket/account/endpoint. Replace the R2 variables with **`PG_BACKUP_PRODUCTION_R2_ACCESS_KEY_ID` / `PG_BACKUP_PRODUCTION_R2_SECRET_ACCESS_KEY`**, populated from the separate read-only token, and set `PG_BACKUP_MAX_AGE_HOURS=36`. Schedule every six hours (`0 */6 * * *`); command **`npm run backup:postgres -- --target production --check`**. No Render API token, public key or private key belongs in the monitor. The staging monitor/template remains unchanged with staging-only read credentials and 144 hours. GitHub schedules require an owner-configured workflow on the default branch, Actions availability and tested failure notifications; this work does not create/activate one. Test empty-bucket check failure/notification before the first archive, then demonstrate healthy status after it.
+Use the implemented `.github/workflows/postgres-backup-freshness.yml` and exact settings in the independent GitHub monitoring section above. Both environments are checked every six hours: production uses main/36 hours and staging uses staging/144 hours. Only separate read-only R2 tokens belong in Actions. The owner reports production backup, checksum verification and an isolated PostgreSQL 18 restore have passed; scheduled monitor execution and notification delivery still require activation/testing. No hosted monitor run or GitHub secret configuration was performed in this implementation task.
 
 **Selected recommendation at the owner's staging-finalization request:** retain fail-fast transport behavior and unsigned encrypted archives, subject to the following concrete production controls. This resolves the release design recommendations; it does not claim that the controls are configured, notifications are delivered, or production recovery is proven. No executable change is required.
 
