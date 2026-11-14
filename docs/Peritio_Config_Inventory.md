@@ -131,10 +131,8 @@ for recovery.
 
 ## Independent PostgreSQL Backups — isolated staging and production tooling
 
-These settings are read by the A2.2 tooling, not by normal API startup. The
-repository supplies an independent monitor workflow; provider resources, GitHub
-secrets/variables and notification preferences are owner configuration. Staging-only
-workflow delivery does not activate its default-branch schedule.
+These settings are read by the A2.2 tooling, not by normal API startup. The job
+and independent monitor are **not configured or activated by this repository**.
 Production requires explicit target/environment/ID-bound confirmation and separate credentials. See the [recovery/setup procedure](./Peritio_Postgres_Independent_Backups.md)
 for the difference between implemented commands and operator configuration examples.
 Do not copy the API's entire environment or a production credential into the job.
@@ -175,24 +173,12 @@ policy. No signing infrastructure or automatic retry loop is introduced. These
 operational controls and a real isolated restore must be verified before activation;
 this change does not claim they are configured or tested in production.
 
-The implemented `.github/workflows/postgres-backup-freshness.yml` uses four
-repository Actions secrets: `PG_BACKUP_PRODUCTION_READ_ACCESS_KEY_ID`,
-`PG_BACKUP_PRODUCTION_READ_SECRET_ACCESS_KEY`, `PG_BACKUP_STAGING_READ_ACCESS_KEY_ID`
-and `PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY`. Use each environment's distinct
-saved bucket-only **read-only** token, never its writer credential.
-
-Eight repository Actions variables are required:
-`PG_BACKUP_PRODUCTION_POSTGRES_ID`, `PG_BACKUP_PRODUCTION_OWNER_ID`,
-`PG_BACKUP_PRODUCTION_R2_ACCOUNT_ID`, `PG_BACKUP_PRODUCTION_R2_ENDPOINT`,
-`PG_BACKUP_STAGING_POSTGRES_ID`, `PG_BACKUP_STAGING_OWNER_ID`,
-`PG_BACKUP_STAGING_R2_ACCOUNT_ID`, `PG_BACKUP_STAGING_R2_ENDPOINT`.
-The workflow maps them into existing CLI runtime names, derives production's
-ID-bound confirmation and fixes buckets/thresholds. R2 secrets are exposed only
-on the check step. No Render API key, database URL or encryption key is needed.
-Every-six-hour scheduling/manual UI requires the workflow on default branch
-main; staging-only commit/push does not activate it. The manual `test_failure`
-input fails before checkout/cloud access for safe notification testing. See the
-setup guide for exact value sources and activation/recipient checks.
+The example GitHub monitor's `PG_BACKUP_STAGING_POSTGRES_ID` and
+`PG_BACKUP_STAGING_OWNER_ID` repository variables map into the canonical runtime
+ID variables above. Its `PG_BACKUP_STAGING_READ_ACCESS_KEY_ID` and
+`PG_BACKUP_STAGING_READ_SECRET_ACCESS_KEY` secrets map into the canonical R2
+credential variables. These are template configuration names, not additional
+application-runtime capabilities or evidence that the workflow is enabled.
 
 ## Training Content Lifecycle And Worker
 
