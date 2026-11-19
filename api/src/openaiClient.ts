@@ -383,7 +383,13 @@ export async function requestResponsesCompletion(params: {
       input: params.messages.map((message) => ({
         role: message.role,
         content: message.content
-      }))
+      })),
+      // Opt out of provider-hosted response storage (the Responses API defaults to
+      // store: true). Every call is stateless: the full message history is sent each
+      // time and no previous_response_id or response id is used. This does not imply
+      // Zero Data Retention; the provider's separate abuse-monitoring retention still
+      // applies unless the organization has a ZDR agreement.
+      store: false
     };
 
     if (typeof params.temperature === "number" && !(params.model === "gpt-6-luna" && reasoningEffort !== "none")) {

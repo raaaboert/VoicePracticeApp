@@ -212,6 +212,10 @@ function assertResetTargetSafety(target: ScriptStorageTarget, cliOptions: Script
   });
 }
 
+// app_state row version (xmin) read with the document; null for file storage.
+// The final write is refused if the row changed in between (see savePersistedAppState).
+let loadedAppStateVersion: string | null = null;
+
 async function loadPersistedAppState(target: ScriptStorageTarget): Promise<ApiDatabase> {
   if (target.provider === "file") {
     const raw = await readFile(target.dbPath, "utf8");
@@ -238,14 +242,15 @@ async function loadPersistedAppState(target: ScriptStorageTarget): Promise<ApiDa
   });
 
   try {
-    const result = await pool.query<{ state_json: unknown }>(
-      "SELECT state_json FROM app_state WHERE id = $1 LIMIT 1",
+    const result = await pool.query<{ state_json: unknown; version: string }>(
+      "SELECT state_json, xmin::text AS version FROM app_state WHERE id = $1 LIMIT 1",
       [APP_STATE_ROW_ID]
     );
     if (result.rows.length === 0) {
       throw new Error("app_state primary row was not found.");
     }
 
+    loadedAppStateVersion = result.rows[0]!.version;
     const parsed = result.rows[0]?.state_json as ApiDatabase;
     if (!Array.isArray(parsed.users) || !Array.isArray(parsed.orgs)) {
       throw new Error("Persisted app_state is missing required users/orgs arrays.");
@@ -277,18 +282,27 @@ async function savePersistedAppState(target: ScriptStorageTarget, db: ApiDatabas
     keepAlive: true
   });
 
+  if (!loadedAppStateVersion) {
+    throw new Error("app_state version was not captured when the document was read.");
+  }
   try {
+    // Fail-safe, not a lock: refuse to overwrite app_state if anything (such as
+    // a running API) changed it after this script read it. Run with the API
+    // stopped; this check only prevents silently discarding newer data.
     const result = await pool.query(
       `
         UPDATE app_state
         SET state_json = $2::jsonb,
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND xmin = $3::xid
       `,
-      [APP_STATE_ROW_ID, JSON.stringify(db)]
+      [APP_STATE_ROW_ID, JSON.stringify(db), loadedAppStateVersion]
     );
     if ((result.rowCount ?? 0) === 0) {
-      throw new Error("app_state primary row was not updated.");
+      throw new Error(
+        "app_state was not updated: it changed after this script read it (or the row is missing). "
+        + "Dedicated-store history may already have been cleared. Stop the API, re-run the dry run, then re-apply."
+      );
     }
   } finally {
     await pool.end();

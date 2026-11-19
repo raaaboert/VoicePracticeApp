@@ -85,6 +85,65 @@ function countTrainingAssignmentProgress(db: ApiDatabase): number {
   return assignments.filter((assignment) => assignment.startedAt !== null || assignment.completedAt !== null).length;
 }
 
+export interface UserScopedHistoryInspectionSummary {
+  suspectedOrphanedUsageSessions: number;
+  suspectedOrphanedSimulationSessions: number;
+  suspectedOrphanedScoreRecords: number;
+  suspectedOrphanedAiUsageEvents: number;
+  suspectedOrphanedSupportCases: number;
+  invalidTrainingPackAssignments: number;
+}
+
+/**
+ * Non-repairing counterpart of repairOrphanedUserScopedHistory for API startup.
+ *
+ * The user population comes from an app_state snapshot that another API
+ * process may already have superseded (for example, it just created a user and
+ * that user's first support case). Deleting on that basis would destroy valid
+ * records, so this inspection only counts suspects for diagnostics. It never
+ * repairs or deletes suspected orphan records and never mutates `params.db`.
+ * Store listing can still perform normal transcript-expiration cleanup, which
+ * clears expired transcript fields while preserving valid support cases.
+ */
+export async function inspectOrphanedUserScopedHistory(params: {
+  db: ApiDatabase;
+  usageSessionAccess: Pick<UsageSessionAccess, "list">;
+  simulationSessionStore: Pick<SimulationSessionStore, "listSessions">;
+  scoreRecordAccess: Pick<ScoreRecordAccess, "list">;
+  aiUsageEventAccess: Pick<AiUsageEventAccess, "list">;
+  supportCaseStore: Pick<SupportCaseStore, "listCases">;
+  now: Date;
+}): Promise<UserScopedHistoryInspectionSummary> {
+  const knownUserIds = new Set(
+    (Array.isArray(params.db.users) ? params.db.users : [])
+      .map((user) => user.id.trim())
+      .filter(Boolean)
+  );
+  knownUserIds.add(DEIDENTIFIED_ACCOUNT_USER_ID);
+  const countUnknown = (records: ReadonlyArray<{ userId: string }>) =>
+    records.filter((record) => !knownUserIds.has(record.userId)).length;
+
+  return {
+    suspectedOrphanedUsageSessions: countUnknown(params.usageSessionAccess.list(params.db)),
+    suspectedOrphanedSimulationSessions: countUnknown(await params.simulationSessionStore.listSessions()),
+    suspectedOrphanedScoreRecords: countUnknown(params.scoreRecordAccess.list(params.db)),
+    suspectedOrphanedAiUsageEvents: countUnknown(await params.aiUsageEventAccess.list()),
+    suspectedOrphanedSupportCases: countUnknown(await params.supportCaseStore.listCases({ now: params.now })),
+    // Counted on a copy: request write paths deactivate these inside their own commits.
+    invalidTrainingPackAssignments: deactivateInvalidTrainingPackAssignments({
+      db: structuredClone(params.db),
+      nowIso: params.now.toISOString(),
+    }),
+  };
+}
+
+/**
+ * DESTRUCTIVE. Deletes user-scoped history whose user is absent from
+ * `params.db.users`. Only safe when `params.db` is the authoritative user
+ * population and no other API process can create users concurrently (API
+ * stopped / exclusive maintenance). API startup must use
+ * inspectOrphanedUserScopedHistory instead.
+ */
 export async function repairOrphanedUserScopedHistory(
   params: IntegrityMaintenanceContext
 ): Promise<UserScopedHistoryRepairSummary> {

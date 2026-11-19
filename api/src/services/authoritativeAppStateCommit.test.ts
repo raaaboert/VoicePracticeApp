@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ApiDatabase, AuditEvent, UserProfile, WebAuthSessionRecord } from "@voicepractice/shared";
-import type { AppStateTransactionClient, DatabaseStorage } from "../storage.js";
+import { AppStateWriteConflictError, type AppStateTransactionClient, type DatabaseStorage } from "../storage.js";
 import type { AuditEventStore } from "../storage/auditEventStore.js";
 import type { UserEmployeeIdClaimStore } from "../storage/userEmployeeIdClaimStore.js";
 import type { WebAuthSessionStore } from "../storage/webAuthSessionStore.js";
@@ -31,15 +31,21 @@ function harness(
   fileMode = false,
   initialStatus: UserProfile["status"] = "active",
   initialOrgStatus: "active" | "disabled" = "active",
-  options?: { initialDb?: ApiDatabase; auditEvent?: AuditEvent; newWebSessions?: WebAuthSessionRecord[] },
+  options?: {
+    initialDb?: ApiDatabase; auditEvent?: AuditEvent; newWebSessions?: WebAuthSessionRecord[];
+    expectedVersion?: string | null;
+  },
 ) {
-  type Durable = { appState: ApiDatabase; sessions: string[]; audits: AuditEvent[]; claims: string[]; notifications: string[] };
+  type Durable = {
+    appState: ApiDatabase; version: number; sessions: string[]; audits: AuditEvent[]; claims: string[]; notifications: string[];
+  };
   const initialDb = options?.initialDb ?? db(initialStatus);
   (initialDb.orgs[0] as { status: string }).status = initialOrgStatus;
-  let durable: Durable = { appState: initialDb, sessions: ["user_1"], audits: [], claims: [], notifications: [] };
+  let durable: Durable = { appState: initialDb, version: 1, sessions: ["user_1"], audits: [], claims: [], notifications: [] };
   let staged: Durable | null = null;
   let activeClient: AppStateTransactionClient | null = null;
   let cached: ApiDatabase | null = null;
+  let cachedVersion: string | null = null;
   const client = { query: async () => ({ rows: [], rowCount: 0 }) } as unknown as AppStateTransactionClient;
   const checkClient = (received?: AppStateTransactionClient | null) => {
     assert.equal(received ?? null, fileMode ? null : activeClient);
@@ -49,10 +55,17 @@ function harness(
   const storage: DatabaseStorage = {
     loadRaw: async () => durable.appState,
     load: async () => durable.appState,
-    save: async (value, received) => {
+    loadVersioned: async () => ({ db: durable.appState, version: String(durable.version) }),
+    save: async (value, received, saveOptions) => {
       const target = checkClient(received);
       if (failure === "save") throw new Error("injected app_state save failure");
+      assert.ok(saveOptions, "authoritative commits always send a base version");
+      if (saveOptions.expectedVersion !== String(target.version)) {
+        throw new AppStateWriteConflictError(saveOptions.expectedVersion);
+      }
       target.appState = structuredClone(value);
+      target.version += 1;
+      return String(target.version);
     },
     updateAppStateWithLock: async () => { throw new Error("unused"); },
     runTransaction: async (callback) => {
@@ -99,6 +112,7 @@ function harness(
   const commit = async (working = db("disabled")) => await commitAuthoritativeAppState({
     storage, claimStore, sessionStore, auditStore,
     before: structuredClone(durable.appState), working,
+    expectedVersion: options && "expectedVersion" in options ? options.expectedVersion ?? null : String(durable.version),
     auditEvents: [options?.auditEvent ?? auditEvent],
     newWebSessions: options?.newWebSessions,
     requiredTransactionSideWrites: [async (received) => {
@@ -107,10 +121,32 @@ function harness(
       target.notifications.push("notification_1");
     }],
     buildPersistedSnapshot: (value) => value,
-    onCommitted: (value) => { cached = value; },
+    onCommitted: (value, version) => { cached = value; cachedVersion = version; },
   });
-  return { commit, getDurable: () => durable, getCache: () => cached };
+  return { commit, getDurable: () => durable, getCache: () => cached, getCachedVersion: () => cachedVersion };
 }
+
+for (const stale of ["0", null] as const) {
+  test(`stale base version (${stale ?? "unknown"}) is refused and rolls back every transactional side-write`, async () => {
+    const subject = harness(null, false, "active", "active", { expectedVersion: stale });
+    await assert.rejects(subject.commit(), (error: unknown) => error instanceof AppStateWriteConflictError);
+    assert.equal(subject.getDurable().appState.users[0]?.status, "active");
+    assert.equal(subject.getDurable().version, 1);
+    assert.deepEqual(subject.getDurable().sessions, ["user_1"]);
+    assert.deepEqual(subject.getDurable().audits, []);
+    assert.deepEqual(subject.getDurable().claims, []);
+    assert.deepEqual(subject.getDurable().notifications, []);
+    assert.equal(subject.getCache(), null);
+    assert.equal(subject.getCachedVersion(), null);
+  });
+}
+
+test("successful commit publishes the committed version together with the cache", async () => {
+  const subject = harness();
+  await subject.commit();
+  assert.equal(subject.getDurable().version, 2);
+  assert.equal(subject.getCachedVersion(), "2");
+});
 
 for (const failure of ["claims", "sessions", "audit", "sidewrite", "save", "commit"] as const) {
   test(`authoritative ${failure} failure rolls back state, session purge, audit, and cache publication`, async () => {
