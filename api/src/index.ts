@@ -244,7 +244,13 @@ import {
   encodeSupportCaseMessage,
   normalizeSupportCaseOrigin,
 } from "./supportCaseOrigin.js";
-import { createDatabaseStorage, DatabaseStorage, type AppStateTransactionClient } from "./storage.js";
+import {
+  createDatabaseStorage,
+  DatabaseStorage,
+  isAppStateWriteConflictError,
+  type AppStateTransactionClient,
+  type AppStateVersion,
+} from "./storage.js";
 import { createAiUsageEventStore } from "./storage/aiUsageEventStore.js";
 import { createAuditEventStore } from "./storage/auditEventStore.js";
 import { createPerformancePlanStore } from "./storage/performancePlanStore.js";
@@ -436,6 +442,7 @@ import {
   migrateLegacyAuditEventsFromAppState as migrateLegacyAuditEventsFromAppStateState
 } from "./services/legacyAuditEventAppStateMigration.js";
 import { migrateUserProfileAppStateNormalization as migrateUserProfileAppStateNormalizationState } from "./services/userProfileAppStateMigration.js";
+import { hasLegacyAppStateRecords } from "./services/legacyAppStateRecords.js";
 import {
   handleDashboardWebAuthCodeRequest,
 } from "./services/dashboardWebAuthRequest.js";
@@ -579,7 +586,7 @@ import {
 import type { PerformanceScopeCandidate } from "./services/performanceScope.js";
 import {
   pruneStaleRecognizedSimulationSessions,
-  repairOrphanedUserScopedHistory
+  inspectOrphanedUserScopedHistory
 } from "./services/integrityMaintenance.js";
 import {
   deactivateInvalidTrainingPackAssignments,
@@ -4751,6 +4758,10 @@ function ensureDatabaseShape(raw: unknown): ApiDatabase {
 
 let databaseStorage: DatabaseStorage | null = null;
 let databaseCache: ApiDatabase | null = null;
+// Stored app_state version that databaseCache was read from or last committed as.
+// Always assigned together with databaseCache; every app_state save sends it so a
+// write derived from a stale cache is refused instead of overwriting newer data.
+let databaseCacheVersion: AppStateVersion | null = null;
 let databaseOperationQueue: Promise<void> = Promise.resolve();
 let databaseOperationObserverForTest: ((phase: "queued" | "acquired" | "released") => void) | null = null;
 let isDatabaseReady = false;
@@ -4792,19 +4803,32 @@ function getOrCreateDatabaseStorage(): DatabaseStorage {
 
 async function loadDatabase(options?: {
   forceStorageRead?: boolean;
-  syncEmployeeIdClaims?: boolean;
 }): Promise<ApiDatabase> {
   if (!options?.forceStorageRead && databaseCache) {
     return databaseCache;
   }
 
+  // Reads never write employee-ID claims: the snapshot may already be stale.
+  // Claims change only inside app_state write transactions (commits, startup
+  // saves, and the locked profile migration/reconcile).
   const storage = getOrCreateDatabaseStorage();
-  const loaded = await storage.load();
-  if (options?.syncEmployeeIdClaims !== false) {
-    await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
-  }
+  const { db: loaded, version } = await storage.loadVersioned();
   databaseCache = loaded;
+  databaseCacheVersion = version;
   return loaded;
+}
+
+function clearDatabaseCache(): void {
+  databaseCache = null;
+  databaseCacheVersion = null;
+}
+
+function logAppStateWriteConflict(error: unknown, context: string): void {
+  if (isAppStateWriteConflictError(error)) {
+    logWarn(`[app-state][conflict] ${context}: refused a write based on a stale app_state version; `
+      + "the app_state transaction rolled back (effects committed outside it may remain) "
+      + "and the cache will reload from storage.");
+  }
 }
 
 function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
@@ -4818,22 +4842,35 @@ function buildPersistedDatabaseSnapshot(db: ApiDatabase): ApiDatabase {
   return snapshot;
 }
 
+/**
+ * Saves a document derived from the current cache (startup migrations only).
+ * Callers must have obtained `db` from loadDatabase() inside the same
+ * withDatabaseLock turn, so databaseCacheVersion is its base version.
+ */
 async function saveDatabase(db: ApiDatabase): Promise<void> {
   const storage = getOrCreateDatabaseStorage();
+  const expectedVersion = databaseCacheVersion;
+  let version: AppStateVersion | null;
   try {
-    await userEmployeeIdClaimStore.syncFromUsers(db.users);
-    if (databaseSaveBarrierForTest) {
-      await databaseSaveBarrierForTest();
-    }
-    await storage.save(buildPersistedDatabaseSnapshot(db));
+    // One transaction, claims table locked before the app_state row: a refused
+    // (stale) save rolls the claim rewrite back with it.
+    version = await storage.runTransaction(async (client) => {
+      await userEmployeeIdClaimStore.syncFromUsers(db.users, client);
+      if (databaseSaveBarrierForTest) {
+        await databaseSaveBarrierForTest();
+      }
+      return await storage.save(buildPersistedDatabaseSnapshot(db), client, { expectedVersion });
+    });
   } catch (error) {
     // A caller outside the copy-on-write helpers may have mutated the cached
     // object directly. Force the next read to reload the durable state rather
     // than exposing or later persisting an uncommitted mutation.
-    databaseCache = null;
+    clearDatabaseCache();
+    logAppStateWriteConflict(error, "startup migration save");
     throw error;
   }
   databaseCache = db;
+  databaseCacheVersion = version;
 }
 
 async function migrateUserProfileAppStateNormalization(): Promise<void> {
@@ -4843,13 +4880,16 @@ async function migrateUserProfileAppStateNormalization(): Promise<void> {
       storage,
       ensureDatabaseShape,
       buildPersistedDatabaseSnapshot,
-      syncEmployeeIds: async (users) => {
-        await userEmployeeIdClaimStore.syncFromUsers(users);
+      // Same lock order as request commits: claims table, then the app_state
+      // row, all on the migration's one transaction client.
+      lockBeforeAppStateRow: (client) => userEmployeeIdClaimStore.lockForAppStateWrite(client),
+      syncEmployeeIds: async (users, client) => {
+        await userEmployeeIdClaimStore.reconcileFromUsers(users, client);
       }
     });
-    const loaded = await storage.load();
-    await userEmployeeIdClaimStore.syncFromUsers(loaded.users);
+    const { db: loaded, version } = await storage.loadVersioned();
     databaseCache = loaded;
+    databaseCacheVersion = version;
   });
 }
 
@@ -4889,7 +4929,6 @@ async function withFreshDatabaseSnapshotRead<T>(handler: (db: ApiDatabase) => T)
   return await withDatabaseLock(async () => {
     const db = await loadDatabase({
       forceStorageRead: true,
-      syncEmployeeIdClaims: false,
     });
     return handler(db);
   });
@@ -4963,7 +5002,6 @@ async function capturePerformanceEvidenceSourceSnapshot() {
     withDatabaseLock,
     loadAppStateReadOnly: async () => await loadDatabase({
       forceStorageRead: true,
-      syncEmployeeIdClaims: false,
     }),
   });
 }
@@ -4977,6 +5015,9 @@ async function commitDatabaseWrite<T>(
       await refreshReportingSnapshots();
     }
     const before = await loadDatabase(options?.fresh ? { forceStorageRead: true } : undefined);
+    // Captured before the handler runs: a handler that reloads the cache must
+    // not move the base version of `before`.
+    const baseVersion = databaseCacheVersion;
     const db = structuredClone(before);
     activeMutationDatabases.add(db);
     try {
@@ -4991,6 +5032,7 @@ async function commitDatabaseWrite<T>(
         challengeStore: authVerificationStore,
         auditStore: auditEventStore,
         before,
+        expectedVersion: baseVersion,
         working: db,
         auditEvents: pendingAuditEvents,
         newWebSessions: pendingWebAuthSessions,
@@ -5000,7 +5042,10 @@ async function commitDatabaseWrite<T>(
           ? async () => { throw webSessionRevocationFailureForTest; }
           : undefined,
         beforeAppStateSave: databaseSaveBarrierForTest ?? undefined,
-        onCommitted: (committed) => { databaseCache = committed; },
+        onCommitted: (committed, version) => {
+          databaseCache = committed;
+          databaseCacheVersion = version;
+        },
       });
       activeMutationDatabases.delete(db);
       return {
@@ -5009,7 +5054,11 @@ async function commitDatabaseWrite<T>(
         shouldTrimTelemetry: pendingAuditEvents.length > 0,
       };
     } catch (error) {
-      databaseCache = null;
+      // Covers AppStateWriteConflictError too: the transaction already rolled
+      // back, so drop the stale cache and do not replay the handler. The next
+      // request reloads the newer stored document.
+      clearDatabaseCache();
+      logAppStateWriteConflict(error, "request write");
       activeMutationDatabases.delete(db);
       drainPendingAuditEvents(db);
       drainPendingWebAuthSessions(db);
@@ -5089,8 +5138,12 @@ async function migrateLegacyAiUsageEventsFromAppState(): Promise<void> {
 
     const legacyAiUsageEvents = Array.isArray(db.aiUsageEvents) ? db.aiUsageEvents : [];
     const migration = await aiUsageEventStore.importLegacyEvents(legacyAiUsageEvents, { now: new Date() });
+    const appStateHadRecords = hasLegacyAppStateRecords(db, "aiUsageEvents");
     delete (db as Partial<ApiDatabase>).aiUsageEvents;
-    await saveDatabase(db);
+    // Rewrite app_state only when it actually held legacy records to strip.
+    if (appStateHadRecords) {
+      await saveDatabase(db);
+    }
 
     if (legacyAiUsageEvents.length > 0 || migration.prunedCount > 0) {
       logWarn(
@@ -5110,8 +5163,12 @@ async function migrateLegacyUsageSessionsFromAppState(): Promise<void> {
 
     const legacyUsageSessions = Array.isArray(db.usageSessions) ? db.usageSessions : [];
     const migration = await usageSessionStore.importLegacyRecords(legacyUsageSessions);
+    const appStateHadRecords = hasLegacyAppStateRecords(db, "usageSessions");
     delete (db as Partial<ApiDatabase>).usageSessions;
-    await saveDatabase(db);
+    // Rewrite app_state only when it actually held legacy records to strip.
+    if (appStateHadRecords) {
+      await saveDatabase(db);
+    }
 
     if (legacyUsageSessions.length > 0) {
       logWarn(
@@ -5130,8 +5187,12 @@ async function migrateLegacyScoreRecordsFromAppState(): Promise<void> {
 
     const legacyScoreRecords = Array.isArray(db.scoreRecords) ? db.scoreRecords : [];
     const migration = await scoreRecordStore.importLegacyRecords(legacyScoreRecords);
+    const appStateHadRecords = hasLegacyAppStateRecords(db, "scoreRecords");
     delete (db as Partial<ApiDatabase>).scoreRecords;
-    await saveDatabase(db);
+    // Rewrite app_state only when it actually held legacy records to strip.
+    if (appStateHadRecords) {
+      await saveDatabase(db);
+    }
 
     if (legacyScoreRecords.length > 0) {
       logWarn(
@@ -5150,8 +5211,12 @@ async function migrateLegacyWebAuthSessionsFromAppState(): Promise<void> {
 
     const legacySessions = Array.isArray(db.webAuthSessions) ? db.webAuthSessions : [];
     const migration = await webAuthSessionStore.importLegacySessions(legacySessions, { now: new Date() });
+    const appStateHadRecords = hasLegacyAppStateRecords(db, "webAuthSessions");
     delete (db as Partial<ApiDatabase>).webAuthSessions;
-    await saveDatabase(db);
+    // Rewrite app_state only when it actually held legacy records to strip.
+    if (appStateHadRecords) {
+      await saveDatabase(db);
+    }
 
     if (legacySessions.length > 0 || migration.skippedExpiredCount > 0) {
       logWarn(
@@ -5171,8 +5236,12 @@ async function migrateLegacySupportCasesFromAppState(): Promise<void> {
 
     const legacySupportCases = Array.isArray(db.supportCases) ? db.supportCases : [];
     const migration = await supportCaseStore.importLegacyCases(legacySupportCases, { now: new Date() });
+    const appStateHadRecords = hasLegacyAppStateRecords(db, "supportCases");
     delete (db as Partial<ApiDatabase>).supportCases;
-    await saveDatabase(db);
+    // Rewrite app_state only when it actually held legacy records to strip.
+    if (appStateHadRecords) {
+      await saveDatabase(db);
+    }
 
     if (legacySupportCases.length > 0) {
       logWarn(
@@ -5184,36 +5253,43 @@ async function migrateLegacySupportCasesFromAppState(): Promise<void> {
 
 async function runStartupUsageIntegrityMaintenance(): Promise<void> {
   await withDatabaseLock(async () => {
-    const db = await loadDatabase();
-    const orphanRepair = await repairOrphanedUserScopedHistory({
+    // Non-destructive by design: during a deploy overlap another API process can
+    // create a user and that user's records after this process read app_state.
+    // Orphan inspection only reports suspects; it never repairs or deletes them.
+    // Store listing may still clear expired transcripts, preserving support cases.
+    const db = await loadDatabase({ forceStorageRead: true });
+    const inspection = await inspectOrphanedUserScopedHistory({
       db,
       usageSessionAccess,
       simulationSessionStore,
       scoreRecordAccess,
       aiUsageEventAccess,
-      supportCaseStore
+      supportCaseStore,
+      now: new Date()
     });
     const staleSessionPrune = await pruneStaleRecognizedSimulationSessions({
       simulationSessionStore,
       now: new Date()
     });
 
-    const hasOrphanRepair =
-      orphanRepair.orphanedUsageSessionsDeleted > 0
-      || orphanRepair.orphanedSimulationSessionsDeleted > 0
-      || orphanRepair.orphanedScoreRecordsDeleted > 0
-      || orphanRepair.orphanedAiUsageEventsDeleted > 0
-      || orphanRepair.orphanedSupportCasesDeleted > 0
-      || orphanRepair.invalidTrainingPackAssignmentsDeactivated > 0;
-    if (hasOrphanRepair) {
+    const hasSuspects =
+      inspection.suspectedOrphanedUsageSessions > 0
+      || inspection.suspectedOrphanedSimulationSessions > 0
+      || inspection.suspectedOrphanedScoreRecords > 0
+      || inspection.suspectedOrphanedAiUsageEvents > 0
+      || inspection.suspectedOrphanedSupportCases > 0
+      || inspection.invalidTrainingPackAssignments > 0;
+    if (hasSuspects) {
       logWarn(
-        `[integrity][startup] cleaned invalid user-scoped history `
-        + `(usage=${orphanRepair.orphanedUsageSessionsDeleted}, `
-        + `recognized_sessions=${orphanRepair.orphanedSimulationSessionsDeleted}, `
-        + `scores=${orphanRepair.orphanedScoreRecordsDeleted}, `
-        + `ai_usage=${orphanRepair.orphanedAiUsageEventsDeleted}, `
-        + `support=${orphanRepair.orphanedSupportCasesDeleted}, `
-        + `assignments=${orphanRepair.invalidTrainingPackAssignmentsDeactivated}).`
+        `[integrity][startup] found suspected orphaned user-scoped history; no suspected orphan records were repaired or deleted `
+        + `(usage=${inspection.suspectedOrphanedUsageSessions}, `
+        + `recognized_sessions=${inspection.suspectedOrphanedSimulationSessions}, `
+        + `scores=${inspection.suspectedOrphanedScoreRecords}, `
+        + `ai_usage=${inspection.suspectedOrphanedAiUsageEvents}, `
+        + `support=${inspection.suspectedOrphanedSupportCases}, `
+        + `invalid_assignments=${inspection.invalidTrainingPackAssignments}). `
+        + "Normal transcript-expiration cleanup may still occur, preserving support cases. "
+        + "Investigate before orphan cleanup; destructive repair requires exclusive maintenance with the API stopped."
       );
     }
 
@@ -22000,7 +22076,6 @@ app.get("/mobile/users/:userId/focus-topics", async (request: Request, response:
     const snapshot = await withDatabaseLock(async () => {
       const db = await loadDatabase({
         forceStorageRead: true,
-        syncEmployeeIdClaims: false,
       });
       const user = getUserById(db, request.params.userId);
       if (!user) {
@@ -22111,7 +22186,6 @@ app.get("/mobile/users/:userId/focus-topics/:topicId", async (request: Request, 
     const snapshot = await withDatabaseLock(async () => {
       const db = await loadDatabase({
         forceStorageRead: true,
-        syncEmployeeIdClaims: false,
       });
       const user = getUserById(db, request.params.userId);
       if (!user) {
@@ -28598,6 +28672,18 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
     return;
   }
 
+  if (isAppStateWriteConflictError(error)) {
+    // The app_state transaction (and every write that shared it) rolled back.
+    // Work this request committed or sent earlier, outside that transaction
+    // (e.g. a consumed sign-in code, an AI call, an uploaded file), may remain,
+    // so do not tell the client that nothing happened. No automatic retry.
+    response.status(409).json({
+      error: "This request conflicted with a simultaneous update and was not completed. "
+        + "Some related changes may already have been applied. Reload and check before trying again.",
+    });
+    return;
+  }
+
   if (isTransientDatabaseError(error)) {
     response.status(503).json({ error: "Database temporarily unavailable. Please retry." });
     return;
@@ -28609,13 +28695,7 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
   });
 });
 
-export async function startApiServer(): Promise<void> {
-  const speechCleanup = await cleanupAbandonedSpeechInputs();
-  if (speechCleanup.removed || speechCleanup.failed) console.log("[speech-activity] startup cleanup", speechCleanup);
-  await authVerificationStore.initialize();
-  await authVerificationStore.purgeExpired();
-  // Explicit migration readiness check only; no 025 DDL at startup.
-  await aiSpendLedgerStore?.initialize();
+async function initializeStartupDatabaseStoresAndMigrations(): Promise<void> {
   await initializeDatabaseStoresForStartup({
     stores: {
       auditEventStore,
@@ -28647,6 +28727,48 @@ export async function startApiServer(): Promise<void> {
       runStartupUsageIntegrityMaintenance
     }
   });
+}
+
+/**
+ * Runs the real startup store initialization and app_state migrations as a
+ * freshly started process would: the app_state cache starts empty.
+ */
+export async function runStartupDatabaseInitializationForTest(): Promise<void> {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("runStartupDatabaseInitializationForTest is only available in test.");
+  }
+  await withDatabaseLock(async () => { clearDatabaseCache(); });
+  await initializeStartupDatabaseStoresAndMigrations();
+}
+
+/** Mutates the current cache and saves it through saveDatabase (the startup-migration save path). */
+export async function saveCachedDatabaseForTest(mutate: (db: ApiDatabase) => void): Promise<void> {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("saveCachedDatabaseForTest is only available in test.");
+  }
+  await withDatabaseLock(async () => {
+    const db = await loadDatabase();
+    mutate(db);
+    await saveDatabase(db);
+  });
+}
+
+/** Runs a handler through the real cached request write path (commitDatabaseWrite). */
+export async function withDatabaseWriteForTest<T>(handler: (db: ApiDatabase) => Promise<T> | T): Promise<T> {
+  if (runtimeConfig.nodeEnv !== "test") {
+    throw new Error("withDatabaseWriteForTest is only available in test.");
+  }
+  return await withDatabaseWrite(handler);
+}
+
+export async function startApiServer(): Promise<void> {
+  const speechCleanup = await cleanupAbandonedSpeechInputs();
+  if (speechCleanup.removed || speechCleanup.failed) console.log("[speech-activity] startup cleanup", speechCleanup);
+  await authVerificationStore.initialize();
+  await authVerificationStore.purgeExpired();
+  // Explicit migration readiness check only; no 025 DDL at startup.
+  await aiSpendLedgerStore?.initialize();
+  await initializeStartupDatabaseStoresAndMigrations();
 
   if (runtimeConfig.focusTopicAuthority === "assignments") {
     await focusTopicAuthorityStore.assertAssignmentsReady();
@@ -28698,7 +28820,7 @@ export function setDatabaseReadinessHarnessForTest(
 ): void {
   if (runtimeConfig.nodeEnv !== "test") throw new Error("Database readiness harness is only available in test.");
   databaseStorage = storage;
-  databaseCache = null;
+  clearDatabaseCache();
   databaseOperationObserverForTest = observer;
 }
 

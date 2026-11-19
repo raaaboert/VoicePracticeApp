@@ -12,7 +12,7 @@ import type {
 import { Pool } from "pg";
 
 import { commitAuthoritativeAppState } from "../services/authoritativeAppStateCommit.js";
-import { createDatabaseStorage } from "../storage.js";
+import { createDatabaseStorage, isAppStateWriteConflictError } from "../storage.js";
 import { createAuditEventStore } from "./auditEventStore.js";
 import { createUserEmployeeIdClaimStore } from "./userEmployeeIdClaimStore.js";
 import { createWebAuthSessionStore } from "./webAuthSessionStore.js";
@@ -206,6 +206,7 @@ test(
           sessionStore,
           auditStore,
           before,
+          expectedVersion: (await storage.loadVersioned()).version,
           working,
           auditEvents: [buildAudit("audit_disable")],
           buildPersistedSnapshot: (value) => value,
@@ -245,6 +246,7 @@ test(
             sessionStore,
             auditStore,
             before,
+            expectedVersion: (await storage.loadVersioned()).version,
             working,
             auditEvents: [buildAudit("audit_failed_disable")],
             buildPersistedSnapshot: (value) => value,
@@ -265,6 +267,49 @@ test(
           "SELECT employee_id, employee_id_normalized FROM user_employee_id_claims WHERE user_id = 'user_1'",
         );
         assert.deepEqual(claim.rows, [{ employee_id: "EMP-001", employee_id_normalized: "emp-001" }]);
+        assert.equal(committedCount, 0);
+      });
+
+      await t.test("stale base version is refused and rolls every authoritative side-write back", async () => {
+        const before = await seed();
+        const staleVersion = (await storage.loadVersioned()).version;
+        // Another API process commits a newer document first.
+        const newer = structuredClone(before);
+        newer.orgs[0]!.name = "Renamed by another process";
+        await storage.save(newer, null, { expectedVersion: staleVersion });
+
+        const working = structuredClone(before);
+        working.users[0]!.status = "disabled";
+        working.users[0]!.employeeId = "EMP-STALE";
+        let committedCount = 0;
+        await assert.rejects(
+          commitAuthoritativeAppState({
+            storage,
+            claimStore,
+            sessionStore,
+            auditStore,
+            before,
+            expectedVersion: staleVersion,
+            working,
+            auditEvents: [buildAudit("audit_stale_disable")],
+            buildPersistedSnapshot: (value) => value,
+            onCommitted: () => { committedCount += 1; },
+          }),
+          (error: unknown) => isAppStateWriteConflictError(error),
+        );
+
+        const persisted = await verificationPool.query<{ state_json: ApiDatabase }>(
+          "SELECT state_json FROM app_state WHERE id = 'primary'",
+        );
+        assert.equal(persisted.rows[0]?.state_json.orgs[0]?.name, "Renamed by another process");
+        assert.equal(persisted.rows[0]?.state_json.users[0]?.status, "active");
+        assert.equal(persisted.rows[0]?.state_json.users[0]?.employeeId, "EMP-001");
+        assert.equal((await verificationPool.query("SELECT 1 FROM web_auth_sessions WHERE user_id = 'user_1'")).rowCount, 1);
+        assert.equal((await verificationPool.query("SELECT 1 FROM audit_events WHERE id = 'audit_stale_disable'")).rowCount, 0);
+        const claim = await verificationPool.query<{ employee_id: string }>(
+          "SELECT employee_id FROM user_employee_id_claims WHERE user_id = 'user_1'",
+        );
+        assert.deepEqual(claim.rows, [{ employee_id: "EMP-001" }]);
         assert.equal(committedCount, 0);
       });
 

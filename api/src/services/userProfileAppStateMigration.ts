@@ -5,7 +5,12 @@ import {
   type PerformanceAccessLevel,
   type UserProfile,
 } from "@voicepractice/shared";
-import type { LockedAppStateUpdate } from "../storage.js";
+import type {
+  AppStateTransactionClient,
+  LockedAppStateUpdate,
+  LockedAppStateUpdateHandler,
+  LockedAppStateUpdateOptions,
+} from "../storage.js";
 
 export const USER_PROFILE_APP_STATE_MIGRATION_KEY = "user_profile_management_v1";
 export const USER_PROFILE_APP_STATE_MIGRATION_VERSION = "2026-07-27";
@@ -24,8 +29,8 @@ const LEGACY_EXTRACTED_STORE_FIELDS = [
 
 export interface UserProfileAppStateMigrationStorage {
   loadRaw(): Promise<unknown>;
-  save(db: ApiDatabase): Promise<void>;
-  updateAppStateWithLock?<T>(handler: (raw: unknown) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>): Promise<T>;
+  save(db: ApiDatabase): Promise<unknown>;
+  updateAppStateWithLock?<T>(handler: LockedAppStateUpdateHandler<T>, options?: LockedAppStateUpdateOptions): Promise<T>;
 }
 
 export interface UserProfileAppStateMigrationResult {
@@ -141,9 +146,19 @@ export async function migrateUserProfileAppStateNormalization(params: {
   storage: UserProfileAppStateMigrationStorage;
   ensureDatabaseShape: (candidate: unknown) => ApiDatabase;
   buildPersistedDatabaseSnapshot: (db: ApiDatabase) => ApiDatabase;
-  syncEmployeeIds?: (users: UserProfile[]) => Promise<void>;
+  /**
+   * Brings employee-ID claims in line with the users this transaction will
+   * leave committed. Always called with the row-locked transaction client so
+   * the claims commit or roll back together with app_state.
+   */
+  syncEmployeeIds?: (users: UserProfile[], client: AppStateTransactionClient | null) => Promise<void>;
+  /** Locks taken before the app_state row lock (claims table first, then the row). */
+  lockBeforeAppStateRow?: (client: AppStateTransactionClient | null) => Promise<void>;
 }): Promise<UserProfileAppStateMigrationResult> {
-  const prepareUpdate = async (raw: unknown): Promise<LockedAppStateUpdate<UserProfileAppStateMigrationResult>> => {
+  const prepareUpdate = async (
+    raw: unknown,
+    client: AppStateTransactionClient | null
+  ): Promise<LockedAppStateUpdate<UserProfileAppStateMigrationResult>> => {
     const rawRecord = asRecord(raw);
     const migrations = normalizeAppStateMigrations(rawRecord.appStateMigrations);
     const performanceAccessMigrationRequired =
@@ -166,6 +181,10 @@ export async function migrateUserProfileAppStateNormalization(params: {
       [PERFORMANCE_ACCESS_APP_STATE_MIGRATION_KEY]: PERFORMANCE_ACCESS_APP_STATE_MIGRATION_VERSION
     };
 
+    // Claims follow the users that will be committed: the migrated users when
+    // saving, otherwise the unchanged locked users. Same transaction either way.
+    await params.syncEmployeeIds?.(normalized.users, client);
+
     if (!profileChanged && !markerChanged) {
       return {
         shouldSave: false,
@@ -177,7 +196,6 @@ export async function migrateUserProfileAppStateNormalization(params: {
       };
     }
 
-    await params.syncEmployeeIds?.(normalized.users);
     return {
       shouldSave: true,
       state: preserveLegacyExtractedStorePayloads(
@@ -193,11 +211,13 @@ export async function migrateUserProfileAppStateNormalization(params: {
   };
 
   if (params.storage.updateAppStateWithLock) {
-    return params.storage.updateAppStateWithLock(prepareUpdate);
+    return params.storage.updateAppStateWithLock(prepareUpdate, {
+      lockBeforeRow: params.lockBeforeAppStateRow,
+    });
   }
 
   const raw = await params.storage.loadRaw();
-  const update = await prepareUpdate(raw);
+  const update = await prepareUpdate(raw, null);
   if (update.shouldSave) {
     await params.storage.save(update.state);
   }

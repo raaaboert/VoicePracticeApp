@@ -1,6 +1,5 @@
 import type { ApiDatabase, AuditEvent, WebAuthSessionRecord } from "@voicepractice/shared";
-import type { DatabaseStorage } from "../storage.js";
-import type { AppStateTransactionClient } from "../storage.js";
+import type { AppStateTransactionClient, AppStateVersion, DatabaseStorage } from "../storage.js";
 import type { AuditEventStore } from "../storage/auditEventStore.js";
 import type { UserEmployeeIdClaimStore } from "../storage/userEmployeeIdClaimStore.js";
 import type { WebAuthSessionStore } from "../storage/webAuthSessionStore.js";
@@ -15,6 +14,12 @@ export interface AuthoritativeAppStateCommitInput {
   challengeStore?: Pick<AuthVerificationStore, "invalidateUsers">;
   auditStore: AuditEventStore;
   before: ApiDatabase;
+  /**
+   * Stored app_state version that `before` was loaded from. The save only
+   * succeeds if the stored document is still that version; otherwise it throws
+   * AppStateWriteConflictError and every write in this transaction rolls back.
+   */
+  expectedVersion: AppStateVersion | null;
   working: ApiDatabase;
   auditEvents: AuditEvent[];
   newWebSessions?: WebAuthSessionRecord[];
@@ -22,14 +27,14 @@ export interface AuthoritativeAppStateCommitInput {
   beforeSessionRevocation?: () => Promise<void>;
   requiredTransactionSideWrites?: Array<(client: AppStateTransactionClient | null) => Promise<void>>;
   beforeAppStateSave?: () => Promise<void>;
-  onCommitted: (db: ApiDatabase) => void;
+  onCommitted: (db: ApiDatabase, version: AppStateVersion | null) => void;
 }
 
 /** Commit governance and credential effects with app_state on one PG client. */
 export async function commitAuthoritativeAppState(input: AuthoritativeAppStateCommitInput): Promise<void> {
   const revokeUserIds = collectWebSessionInvalidations(input.before, input.working);
   const cancelChallengeUserIds = collectAuthChallengeInvalidations(input.before, input.working);
-  await input.storage.runTransaction(async (client) => {
+  const committedVersion = await input.storage.runTransaction(async (client) => {
     await input.claimStore.syncFromUsers(input.working.users, client);
     await input.challengeStore?.invalidateUsers(cancelChallengeUserIds, client);
     if (revokeUserIds.length > 0) {
@@ -46,10 +51,13 @@ export async function commitAuthoritativeAppState(input: AuthoritativeAppStateCo
       await sideWrite(client);
     }
     await input.beforeAppStateSave?.();
-    await input.storage.save(input.buildPersistedSnapshot(input.working), client);
+    const version = await input.storage.save(input.buildPersistedSnapshot(input.working), client, {
+      expectedVersion: input.expectedVersion,
+    });
     // File storage has no cross-file transaction. Close its pre-save issuance window fail-closed.
     if (!client) await input.challengeStore?.invalidateUsers(cancelChallengeUserIds, null);
+    return version;
   });
   // COMMIT has returned. Publishing before this line would expose rollback state.
-  input.onCommitted(input.working);
+  input.onCommitted(input.working, committedVersion);
 }

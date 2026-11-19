@@ -255,7 +255,7 @@ test("frozen production baseline startup compatibility migrates performance acce
       async updateAppStateWithLock<T>(
         handler: Parameters<typeof baseStorage.updateAppStateWithLock<T>>[0]
       ): Promise<T> {
-        const update = await handler(await baseStorage.loadRaw());
+        const update = await handler(await baseStorage.loadRaw(), null);
         if (update.shouldSave) {
           await this.save(update.state);
         }
@@ -372,10 +372,13 @@ test("frozen production baseline startup compatibility migrates performance acce
     assert.deepEqual(secondPersisted.users, firstPersisted.users);
     assert.deepEqual(secondPersisted.appStateMigrations, firstPersisted.appStateMigrations);
     assert.deepEqual(profileMigrationResults[1], { saved: false, profileChanged: false, markerChanged: false });
-    assert.equal(employeeClaimSyncCount, 1);
-    assert.equal(appStateWriteCount, 3);
+    // Claims are reconciled inside the locked migration transaction on every
+    // start (the reconcile itself writes only when claims differ).
+    assert.equal(employeeClaimSyncCount, 2);
+    // A restart with nothing left to migrate must not rewrite app_state.
+    assert.equal(appStateWriteCount, 2);
     assert.deepEqual(auditMigrationResults[1], {
-      migrated: true,
+      migrated: false,
       legacyEventCount: 0,
       importedCount: 0,
       trimmedCount: 0
