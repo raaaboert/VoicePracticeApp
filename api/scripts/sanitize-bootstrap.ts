@@ -185,9 +185,9 @@ async function resolveTrainingPackOrgColumn(
   return null;
 }
 
-async function loadAppState(pool: Pool): Promise<ApiDatabase> {
-  const result = await pool.query<{ state_json: unknown }>(
-    "SELECT state_json FROM app_state WHERE id = $1 LIMIT 1",
+async function loadAppState(pool: Pool): Promise<{ appState: ApiDatabase; version: string }> {
+  const result = await pool.query<{ state_json: unknown; version: string }>(
+    "SELECT state_json, xmin::text AS version FROM app_state WHERE id = $1 LIMIT 1",
     [APP_STATE_ROW_ID]
   );
   const row = result.rows[0];
@@ -195,7 +195,7 @@ async function loadAppState(pool: Pool): Promise<ApiDatabase> {
     throw new Error("app_state primary row was not found. Restore or initialize app_state before sanitizing.");
   }
 
-  return row.state_json as ApiDatabase;
+  return { appState: row.state_json as ApiDatabase, version: row.version };
 }
 
 async function buildTableReport(params: {
@@ -241,21 +241,31 @@ async function buildTableReport(params: {
 async function applySanitization(params: {
   pool: Pool;
   sanitizedAppState: ApiDatabase;
+  expectedAppStateVersion: string;
   tables: Record<string, TableCountReport>;
   removedOrgIds: string[];
 }): Promise<void> {
   const client = await params.pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(
+    // Fail-safe, not a lock: refuse (and roll back every table change below) if
+    // app_state changed after the inventory read, e.g. because an API is still
+    // running against this database. Sanitize only offline/scratch databases.
+    const updated = await client.query(
       `
         UPDATE app_state
         SET state_json = $2::jsonb,
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND xmin = $3::xid
       `,
-      [APP_STATE_ROW_ID, JSON.stringify(params.sanitizedAppState)]
+      [APP_STATE_ROW_ID, JSON.stringify(params.sanitizedAppState), params.expectedAppStateVersion]
     );
+    if ((updated.rowCount ?? 0) === 0) {
+      throw new Error(
+        "app_state changed after the inventory was read (or the row is missing); nothing was applied. "
+        + "Stop every API connected to this database, re-run the dry run, then re-apply."
+      );
+    }
 
     for (const tableName of OPERATIONAL_TABLES) {
       const tableReport = params.tables[tableName];
@@ -297,7 +307,7 @@ async function main(): Promise<void> {
 
   const pool = new Pool({ connectionString: args.databaseUrl });
   try {
-    const appState = await loadAppState(pool);
+    const { appState, version: appStateVersion } = await loadAppState(pool);
     const { sanitized, report: appStateReport } = sanitizeAppState(appState, args.profile);
     const tables = await buildTableReport({
       pool,
@@ -327,6 +337,7 @@ async function main(): Promise<void> {
       await applySanitization({
         pool,
         sanitizedAppState: sanitized,
+        expectedAppStateVersion: appStateVersion,
         tables,
         removedOrgIds: appStateReport.removedOrgIds
       });

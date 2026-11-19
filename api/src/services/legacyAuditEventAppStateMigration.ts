@@ -1,6 +1,7 @@
 import type { ApiDatabase } from "@voicepractice/shared";
 
 import type { AuditEventStore } from "../storage/auditEventStore.js";
+import { hasLegacyAppStateRecords } from "./legacyAppStateRecords.js";
 
 export interface LegacyAuditEventAppStateMigrationResult {
   migrated: boolean;
@@ -26,14 +27,19 @@ export async function migrateLegacyAuditEventsFromAppState(params: {
   }
 
   const legacyAuditEvents = Array.isArray(db.auditEvents) ? db.auditEvents : [];
+  // The dedicated-store import (and its retention trim) runs as before.
   const migration = await params.auditEventStore.importLegacyEvents(legacyAuditEvents, {
     maxRecords: params.maxRecords
   });
+  const appStateHadRecords = hasLegacyAppStateRecords(db, "auditEvents");
   delete (db as Partial<ApiDatabase>).auditEvents;
-  await params.saveDatabase(db);
+  // Rewrite app_state only when it actually held legacy records to strip.
+  if (appStateHadRecords) {
+    await params.saveDatabase(db);
+  }
 
   return {
-    migrated: true,
+    migrated: appStateHadRecords,
     legacyEventCount: legacyAuditEvents.length,
     importedCount: migration.importedCount,
     trimmedCount: migration.trimmedCount

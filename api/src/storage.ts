@@ -8,15 +8,74 @@ export type LockedAppStateUpdate<T> =
   | { result: T; shouldSave: false }
   | { result: T; shouldSave: true; state: ApiDatabase };
 
-export type LockedAppStateUpdateHandler<T> = (raw: unknown) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>;
 export type AppStateTransactionClient = Pick<PoolClient, "query">;
+/**
+ * Receives the stored document and the transaction client that holds its row
+ * lock (null for file storage). Any related write the handler makes must use
+ * this client so it commits or rolls back with the app_state update and never
+ * waits on a second connection while this row lock is held.
+ */
+export type LockedAppStateUpdateHandler<T> = (
+  raw: unknown,
+  client: AppStateTransactionClient | null
+) => LockedAppStateUpdate<T> | Promise<LockedAppStateUpdate<T>>;
+
+export interface LockedAppStateUpdateOptions {
+  /**
+   * Runs inside the transaction before the app_state row lock is taken. Use it
+   * to take locks that other app_state writers take before the row (the
+   * employee-ID claims table), so every writer acquires locks in one order.
+   */
+  lockBeforeRow?: (client: AppStateTransactionClient | null) => Promise<void>;
+}
+
+/**
+ * Opaque row-version token for the PostgreSQL app_state document (the row's
+ * `xmin`, as text). PostgreSQL assigns a new xmin on every committed UPDATE,
+ * so a token read with a snapshot identifies exactly that committed version.
+ * File storage has no versions and always reports null.
+ */
+export type AppStateVersion = string;
+
+export interface VersionedAppState {
+  db: ApiDatabase;
+  version: AppStateVersion | null;
+}
+
+export interface AppStateSaveOptions {
+  /**
+   * Version of the stored document this write was derived from. When present,
+   * PostgreSQL storage only writes if the stored row is still that version and
+   * otherwise throws AppStateWriteConflictError without changing anything.
+   * Omit it only for deliberate whole-document replacement (seeding, tests).
+   */
+  expectedVersion: AppStateVersion | null;
+}
+
+export class AppStateWriteConflictError extends Error {
+  readonly code = "app_state_write_conflict";
+
+  constructor(readonly expectedVersion: AppStateVersion | null) {
+    super(
+      expectedVersion === null
+        ? "app_state write refused: the write has no known base version."
+        : "app_state write refused: the stored document changed after this process read it."
+    );
+    this.name = "AppStateWriteConflictError";
+  }
+}
+
+export function isAppStateWriteConflictError(error: unknown): error is AppStateWriteConflictError {
+  return error instanceof AppStateWriteConflictError;
+}
 
 export interface DatabaseStorage {
   loadRaw(): Promise<unknown>;
   load(): Promise<ApiDatabase>;
-  save(db: ApiDatabase, client?: AppStateTransactionClient | null): Promise<void>;
+  loadVersioned(): Promise<VersionedAppState>;
+  save(db: ApiDatabase, client?: AppStateTransactionClient | null, options?: AppStateSaveOptions): Promise<AppStateVersion | null>;
   runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T>;
-  updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T>;
+  updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>, options?: LockedAppStateUpdateOptions): Promise<T>;
 }
 
 interface CreateDatabaseStorageParams {
@@ -72,7 +131,12 @@ class FileDatabaseStorage implements DatabaseStorage {
     return this.ensureDatabaseShape(await this.loadRaw());
   }
 
-  async save(db: ApiDatabase): Promise<void> {
+  async loadVersioned(): Promise<VersionedAppState> {
+    // Local file storage is a single-process development provider without row versions.
+    return { db: await this.load(), version: null };
+  }
+
+  async save(db: ApiDatabase): Promise<AppStateVersion | null> {
     // File readers outside the API mutation queue (including auth identity reads)
     // must see a complete old or new snapshot, never a truncated in-place write.
     const temporary = `${this.dbPath}.${randomUUID()}.tmp`;
@@ -91,6 +155,7 @@ class FileDatabaseStorage implements DatabaseStorage {
       await fs.rm(temporary, { force: true }).catch(() => undefined);
       throw error;
     }
+    return null;
   }
 
   async runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T> {
@@ -99,8 +164,9 @@ class FileDatabaseStorage implements DatabaseStorage {
     return await handler(null);
   }
 
-  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {
-    const update = await handler(await this.loadRaw());
+  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>, options?: LockedAppStateUpdateOptions): Promise<T> {
+    await options?.lockBeforeRow?.(null);
+    const update = await handler(await this.loadRaw(), null);
     if (update.shouldSave) {
       await this.save(update.state);
     }
@@ -148,44 +214,105 @@ class PostgresDatabaseStorage implements DatabaseStorage {
     await this.ensureTablePromise;
   }
 
-  private async writeRow(payload: unknown, client: AppStateTransactionClient = this.pool): Promise<void> {
-    await client.query(
+  /** Unconditional whole-document replacement. Only for callers without a base version. */
+  private async writeRow(payload: unknown, client: AppStateTransactionClient = this.pool): Promise<AppStateVersion | null> {
+    const result = await client.query<{ version: string }>(
       `
         INSERT INTO app_state (id, state_json, updated_at)
         VALUES ($1, $2::jsonb, NOW())
         ON CONFLICT (id) DO UPDATE
           SET state_json = EXCLUDED.state_json,
-              updated_at = NOW();
+              updated_at = NOW()
+        RETURNING xmin::text AS version;
       `,
       [APP_STATE_ROW_ID, JSON.stringify(payload)]
     );
+    return result.rows[0]?.version ?? null;
+  }
+
+  /**
+   * Compare-and-set write. Under READ COMMITTED, if another transaction holds
+   * the row this UPDATE waits for it; after that transaction commits, the
+   * WHERE clause is re-evaluated against the newest row version, so a token
+   * from an older version matches zero rows. Nothing is written in that case.
+   */
+  private async writeRowIfVersion(
+    payload: unknown,
+    expectedVersion: AppStateVersion | null,
+    client: AppStateTransactionClient
+  ): Promise<AppStateVersion> {
+    if (expectedVersion === null) {
+      throw new AppStateWriteConflictError(null);
+    }
+    const result = await client.query<{ version: string }>(
+      `
+        UPDATE app_state
+        SET state_json = $2::jsonb,
+            updated_at = NOW()
+        WHERE id = $1 AND xmin = $3::xid
+        RETURNING xmin::text AS version;
+      `,
+      [APP_STATE_ROW_ID, JSON.stringify(payload), expectedVersion]
+    );
+    if (result.rows.length !== 1) {
+      throw new AppStateWriteConflictError(expectedVersion);
+    }
+    return result.rows[0]!.version;
+  }
+
+  private async loadRawVersioned(): Promise<{ raw: unknown; version: AppStateVersion }> {
+    await this.ensureTable();
+
+    const select = () => this.pool.query<{ state_json: unknown; version: string }>(
+      "SELECT state_json, xmin::text AS version FROM app_state WHERE id = $1 LIMIT 1",
+      [APP_STATE_ROW_ID]
+    );
+    let result = await select();
+
+    if (result.rows.length === 0) {
+      // Create the default document only if no other process created it first,
+      // then read back whichever document actually won.
+      await this.pool.query(
+        `
+          INSERT INTO app_state (id, state_json, updated_at)
+          VALUES ($1, $2::jsonb, NOW())
+          ON CONFLICT (id) DO NOTHING;
+        `,
+        [APP_STATE_ROW_ID, JSON.stringify(this.createDefaultDatabase())]
+      );
+      result = await select();
+      if (result.rows.length === 0) {
+        throw new Error("PostgreSQL app_state row could not be initialized.");
+      }
+    }
+
+    const row = result.rows[0]!;
+    return { raw: row.state_json, version: row.version };
   }
 
   async loadRaw(): Promise<unknown> {
-    await this.ensureTable();
-
-    const result = await this.pool.query<{ state_json: unknown }>(
-      "SELECT state_json FROM app_state WHERE id = $1 LIMIT 1",
-      [APP_STATE_ROW_ID]
-    );
-
-    if (result.rows.length === 0) {
-      const created = this.createDefaultDatabase();
-      await this.writeRow(created);
-      return created;
-    }
-
-    const row = result.rows[0];
-    return row.state_json;
+    return (await this.loadRawVersioned()).raw;
   }
 
   async load(): Promise<ApiDatabase> {
     return this.ensureDatabaseShape(await this.loadRaw());
   }
 
-  async save(db: ApiDatabase, client?: AppStateTransactionClient | null): Promise<void> {
+  async loadVersioned(): Promise<VersionedAppState> {
+    const { raw, version } = await this.loadRawVersioned();
+    return { db: this.ensureDatabaseShape(raw), version };
+  }
+
+  async save(
+    db: ApiDatabase,
+    client?: AppStateTransactionClient | null,
+    options?: AppStateSaveOptions
+  ): Promise<AppStateVersion | null> {
     await this.ensureTable();
-    await this.writeRow(db, client ?? this.pool);
+    if (options) {
+      return await this.writeRowIfVersion(db, options.expectedVersion, client ?? this.pool);
+    }
+    return await this.writeRow(db, client ?? this.pool);
   }
 
   async runTransaction<T>(handler: (client: AppStateTransactionClient | null) => Promise<T>): Promise<T> {
@@ -207,7 +334,7 @@ class PostgresDatabaseStorage implements DatabaseStorage {
     }
   }
 
-  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>): Promise<T> {
+  async updateAppStateWithLock<T>(handler: LockedAppStateUpdateHandler<T>, options?: LockedAppStateUpdateOptions): Promise<T> {
     await this.ensureTable();
     if (!this.pool.connect) {
       throw new Error("PostgreSQL app-state migration requires a transaction-capable query pool.");
@@ -216,6 +343,7 @@ class PostgresDatabaseStorage implements DatabaseStorage {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await options?.lockBeforeRow?.(client);
       await client.query(
         `
           INSERT INTO app_state (id, state_json, updated_at)
@@ -232,7 +360,7 @@ class PostgresDatabaseStorage implements DatabaseStorage {
         throw new Error("PostgreSQL app_state row was not initialized before migration.");
       }
 
-      const update = await handler(result.rows[0]!.state_json);
+      const update = await handler(result.rows[0]!.state_json, client);
       if (update.shouldSave) {
         await client.query(
           `

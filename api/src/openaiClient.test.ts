@@ -194,6 +194,7 @@ test("configured Responses requests send output caps and optional reasoning with
       { role: "system", content: "system prompt" },
       { role: "user", content: "user prompt" },
     ],
+    store: false,
     max_output_tokens: 220,
     reasoning: {
       effort: "low",
@@ -220,6 +221,28 @@ test("default Responses requests omit reasoning and temperature", async () => {
   assert.deepEqual(parseJsonBody(request), {
     model: "responses-model",
     input: [{ role: "user", content: "user prompt" }],
+    store: false,
     max_output_tokens: 160,
   });
+});
+
+test("every Responses request opts out of provider-hosted storage in the serialized body", async () => {
+  const variants = [
+    { model: "responses-model", reasoningEffort: undefined, maxOutputTokens: undefined },
+    { model: "responses-model", reasoningEffort: "low" as const, maxOutputTokens: 220 },
+    { model: "gpt-6-luna", reasoningEffort: undefined, maxOutputTokens: 1600 },
+    { model: "gpt-6-luna", reasoningEffort: "low" as const, maxOutputTokens: 1600 },
+  ];
+  for (const variant of variants) {
+    const request = await captureRequest(
+      () => requestCompletion({ apiFamily: "responses", messages: [{ role: "user", content: "synthetic" }], temperature: 0.5, ...variant }),
+      { output_text: "reply" }
+    );
+    assert.equal(request.url, "https://api.openai.com/v1/responses");
+    const raw = request.init?.body;
+    assert.equal(typeof raw, "string");
+    const body = JSON.parse(raw as string) as Record<string, unknown>;
+    assert.equal(body.store, false, `store must be literal false for ${variant.model}/${variant.reasoningEffort ?? "default"}`);
+    assert.equal(Object.hasOwn(body, "previous_response_id"), false, "requests stay stateless");
+  }
 });
